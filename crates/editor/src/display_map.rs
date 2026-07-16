@@ -100,7 +100,9 @@ use gpui::{
 };
 use language::{
     LanguageAwareStyling, Point, Subscription as BufferSubscription,
-    language_settings::{AllLanguageSettings, LanguageSettings, SoftWrapIndent},
+    language_settings::{
+        AllLanguageSettings, IndentationSettings, LanguageSettings, SoftWrapIndent,
+    },
 };
 
 use multi_buffer::{
@@ -1372,9 +1374,14 @@ impl DisplayMap {
     #[instrument(skip_all)]
     fn tab_size(buffer: &Entity<MultiBuffer>, cx: &App) -> NonZeroU32 {
         if let Some(buffer) = buffer.read(cx).as_singleton().map(|buffer| buffer.read(cx)) {
-            LanguageSettings::for_buffer(buffer, cx).tab_size
+            LanguageSettings::for_buffer(buffer, cx)
+                .indentation()
+                .tab_width()
         } else {
-            AllLanguageSettings::get_global(cx).defaults.tab_size
+            AllLanguageSettings::get_global(cx)
+                .defaults
+                .indentation()
+                .tab_width()
         }
     }
 
@@ -2290,6 +2297,14 @@ impl DisplaySnapshot {
         self.buffer_snapshot().line_indent_for_row(buffer_row)
     }
 
+    fn indentation_column_for_buffer_row(&self, buffer_row: MultiBufferRow) -> u32 {
+        let tab_width = self.tab_snapshot().tab_size;
+        self.buffer_snapshot().indentation_column_for_line(
+            buffer_row,
+            IndentationSettings::new(tab_width, tab_width, false),
+        )
+    }
+
     pub fn line_len(&self, row: DisplayRow) -> u32 {
         self.block_snapshot.line_len(BlockRow(row.0))
     }
@@ -2314,11 +2329,14 @@ impl DisplaySnapshot {
         if line_indent.is_line_blank() {
             return false;
         }
+        let indentation_column = self.indentation_column_for_buffer_row(buffer_row);
 
         (buffer_row.0 + 1..=max_row.0)
             .find_map(|next_row| {
                 let next_line_indent = self.line_indent_for_buffer_row(MultiBufferRow(next_row));
-                if next_line_indent.raw_len() > line_indent.raw_len() {
+                if self.indentation_column_for_buffer_row(MultiBufferRow(next_row))
+                    > indentation_column
+                {
                     Some(true)
                 } else if !next_line_indent.is_line_blank() {
                     Some(false)
@@ -2394,7 +2412,7 @@ impl DisplaySnapshot {
             && self.starts_indent(MultiBufferRow(start.row))
             && !self.is_line_folded(MultiBufferRow(start.row))
         {
-            let start_line_indent = self.line_indent_for_buffer_row(buffer_row);
+            let start_indent_column = self.indentation_column_for_buffer_row(buffer_row);
             let snapshot = self.buffer_snapshot();
             let max_point = snapshot.max_point();
             let mut closing_row = None;
@@ -2414,7 +2432,8 @@ impl DisplaySnapshot {
             for row in (buffer_row.0 + 1)..=max_point.row {
                 let line_indent = self.line_indent_for_buffer_row(MultiBufferRow(row));
                 if !line_indent.is_line_blank()
-                    && line_indent.raw_len() <= start_line_indent.raw_len()
+                    && self.indentation_column_for_buffer_row(MultiBufferRow(row))
+                        <= start_indent_column
                 {
                     let in_string_or_comment_scope = snapshot
                         .language_scope_at(Point::new(row, 0))
@@ -4370,6 +4389,43 @@ pub mod tests {
 
             map
         });
+    }
+
+    #[gpui::test]
+    fn test_indent_folding_uses_logical_columns(cx: &mut gpui::App) {
+        init_test(cx, &|settings| {
+            settings.project.all_languages.defaults.tab_size = NonZeroU32::new(4);
+        });
+
+        let buffer = MultiBuffer::build_simple("    parent\n\t child\nnext", cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let map = cx.new(|cx| {
+            DisplayMap::new(
+                buffer,
+                font("Helvetica"),
+                px(14.0),
+                None,
+                1,
+                1,
+                FoldPlaceholder::test(),
+                DiagnosticSeverity::Warning,
+                cx,
+            )
+        });
+        map.update(cx, |map, cx| {
+            map.splice_inlays(
+                &[],
+                vec![Inlay::mock_hint(
+                    0,
+                    buffer_snapshot.anchor_after(MultiBufferOffset(2)),
+                    "long inlay",
+                )],
+                cx,
+            );
+        });
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+
+        assert!(snapshot.starts_indent(MultiBufferRow(0)));
     }
 
     #[gpui::test]
