@@ -1226,12 +1226,12 @@ mod git_traversal {
 
 mod git_worktrees {
     use fs::{FakeFs, Fs};
-    use gpui::TestAppContext;
+    use gpui::{BorrowAppContext, TestAppContext};
     use project::worktrees_directory_for_repo;
     use serde_json::json;
     use settings::SettingsStore;
     use std::path::{Path, PathBuf};
-    use util::{path, paths::PathStyle};
+    use util::{path, paths::PathStyle, test::TempTree};
 
     fn init_test(cx: &mut gpui::TestAppContext) {
         zlog::init_test();
@@ -1461,6 +1461,106 @@ mod git_worktrees {
             .expect("should find bugfix-branch worktree");
         assert_eq!(worktree_2.path, worktree_2_directory);
         assert_eq!(worktree_2.sha.as_ref(), "fake-sha");
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_worktree_commands_replace_git_worktree(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let directory = TempTree::new(json!({ "root": {} }));
+        let root = directory.path().join("root");
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(&root, json!({ ".git": {}, "file.txt": "content" }))
+            .await;
+        fs.set_head_for_repo(&root.join(".git"), &[], "head-sha");
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let git = settings.git.get_or_insert_default();
+                    git.worktree_create_command = Some(vec![
+                        "sh".into(),
+                        "-c".into(),
+                        r#"printf '%s\n' "$@" > create-arguments"#.into(),
+                        "sh".into(),
+                    ]);
+                    git.worktree_remove_command = Some(vec![
+                        "sh".into(),
+                        "-c".into(),
+                        r#"printf '%s\n' "$@" > remove-arguments"#.into(),
+                        "sh".into(),
+                    ]);
+                });
+            });
+        });
+
+        let project = Project::test(fs.clone(), [root.as_path()], cx).await;
+        cx.executor().run_until_parked();
+        let repository = project.read_with(cx, |project, cx| {
+            project.repositories(cx).values().next().unwrap().clone()
+        });
+
+        let worktree_path = directory.path().join("worktrees/root/feature");
+        cx.update(|cx| {
+            repository.update(cx, |repository, _| {
+                repository.create_worktree(
+                    git::repository::CreateWorktreeTarget::Detached { base_sha: None },
+                    worktree_path.clone(),
+                )
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("create-arguments")).unwrap(),
+            format!("{}\nhead-sha\n", worktree_path.display())
+        );
+        assert!(Fs::is_dir(fs.as_ref(), worktree_path.parent().unwrap()).await);
+
+        fs.insert_tree(&worktree_path, json!({ "file.txt": "content" }))
+            .await;
+        cx.update(|cx| {
+            repository.update(cx, |repository, _| {
+                repository.remove_worktree(worktree_path.clone(), true)
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("remove-arguments")).unwrap(),
+            format!("{}\n--force\n", worktree_path.display())
+        );
+        assert!(Fs::is_dir(fs.as_ref(), &worktree_path).await);
+
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git.get_or_insert_default().worktree_create_command = Some(vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "echo 'cannot add workspace' >&2; exit 3".into(),
+                    ]);
+                });
+            });
+        });
+        let error = cx
+            .update(|cx| {
+                repository.update(cx, |repository, _| {
+                    repository.create_worktree(
+                        git::repository::CreateWorktreeTarget::Detached { base_sha: None },
+                        directory.path().join("worktrees/root/failing"),
+                    )
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot add workspace"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[gpui::test]

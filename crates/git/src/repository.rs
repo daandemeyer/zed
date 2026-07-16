@@ -2545,12 +2545,18 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 let git_binary = git_binary?;
-                let mut args: Vec<String> =
-                    vec!["diff".into(), "--numstat".into(), "--no-renames".into()];
-                match diff {
-                    DiffStatType::HeadToIndex => args.extend(["--cached".into(), "HEAD".into()]),
-                    DiffStatType::HeadToWorktree => args.push("HEAD".into()),
-                    DiffStatType::IndexToWorktree => {}
+                // `git diff` refreshes stale stat information and writes the index back under
+                // index.lock, even with --no-optional-locks. That makes other tools that write
+                // the index, such as jj in a colocated repository, fail while this runs. The
+                // plumbing commands never write the index and report the same numstat output.
+                let mut args: Vec<String> = match diff {
+                    DiffStatType::HeadToIndex => vec!["diff-index".into(), "--cached".into()],
+                    DiffStatType::HeadToWorktree => vec!["diff-index".into()],
+                    DiffStatType::IndexToWorktree => vec!["diff-files".into()],
+                };
+                args.extend(["--numstat".into(), "--no-renames".into()]);
+                if !matches!(diff, DiffStatType::IndexToWorktree) {
+                    args.push("HEAD".into());
                 }
                 if !path_prefixes.is_empty() {
                     args.push("--".into());
@@ -4303,6 +4309,7 @@ mod tests {
     use std::{
         ffi::{OsStr, OsString},
         fs,
+        time::{Duration, UNIX_EPOCH},
     };
 
     use super::*;
@@ -4478,6 +4485,58 @@ mod tests {
             original_repo_path_from_common_dir(&repository.common_dir).unwrap(),
             repo_dir.path(),
         );
+    }
+
+    #[gpui::test]
+    async fn test_diff_stat_does_not_write_index(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        git_init_repo(repo_dir.path());
+        let unchanged_path = repo_dir.path().join("unchanged.txt");
+        fs::write(&unchanged_path, "unchanged\n").unwrap();
+        fs::write(repo_dir.path().join("changed.txt"), "one\n").unwrap();
+        git_command(repo_dir.path(), ["add", "."]);
+        git_command(repo_dir.path(), ["commit", "-m", "base"]);
+
+        // A modification time that no longer matches the index entry makes `git diff` refresh
+        // and rewrite the index, even though the file contents are unchanged.
+        fs::File::options()
+            .write(true)
+            .open(&unchanged_path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1_000_000_000))
+            .unwrap();
+        fs::write(repo_dir.path().join("changed.txt"), "one\ntwo\n").unwrap();
+        let index_path = repo_dir.path().join(".git/index");
+        let index_before = fs::read(&index_path).unwrap();
+
+        let repository = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+        let changed = [(
+            RepoPath::new("changed.txt").unwrap(),
+            crate::status::DiffStat {
+                added: 1,
+                deleted: 0,
+            },
+        )];
+        for diff in [DiffStatType::HeadToWorktree, DiffStatType::IndexToWorktree] {
+            let stat = repository.diff_stat(diff, &[]).await.unwrap();
+            assert_eq!(&*stat.entries, &changed);
+        }
+        let stat = repository
+            .diff_stat(DiffStatType::HeadToIndex, &[])
+            .await
+            .unwrap();
+        assert!(stat.entries.is_empty());
+
+        assert_eq!(fs::read(&index_path).unwrap(), index_before);
     }
 
     #[gpui::test]
