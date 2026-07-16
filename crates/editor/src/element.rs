@@ -2101,7 +2101,7 @@ impl EditorElement {
         })?;
 
         let buffer_point = display_point.to_point(&snapshot.display_snapshot);
-        let new_display_row = snapshot.display_row_for_inline_code_action(buffer_point)?;
+        let new_display_row = snapshot.display_row_for_inline_code_action(buffer_point, cx)?;
 
         let start_y = content_origin.y
             + (((new_display_row.as_f64() - scroll_position.y) as f32) * line_height)
@@ -2409,8 +2409,11 @@ impl EditorElement {
                 .into_iter()
                 .enumerate()
                 .filter_map(|(i, indent_guide)| {
-                    let single_indent_width =
-                        column_pixels(&self.style, indent_guide.tab_size as usize, window);
+                    let single_indent_width = column_pixels(
+                        &self.style,
+                        indent_guide.indentation.indent_size().get() as usize,
+                        window,
+                    );
                     let total_width = single_indent_width * indent_guide.depth as f32;
                     let start_x = Pixels::from(
                         ScrollOffset::from(content_origin.x + total_width)

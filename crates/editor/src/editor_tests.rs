@@ -31,8 +31,8 @@ use language::{
     LanguageConfig, LanguageConfigOverride, LanguageMatcher, LanguageName, LanguageQueries,
     LanguageToolchainStore, Override, PLAIN_TEXT, Point,
     language_settings::{
-        CompletionSettingsContent, FormatOnSave, FormatterList, LanguageSettingsContent,
-        LspInsertMode,
+        CompletionSettingsContent, FormatOnSave, FormatterList, IndentationSettings,
+        LanguageSettingsContent, LspInsertMode,
     },
     tree_sitter_python,
 };
@@ -6411,6 +6411,42 @@ fn test_insert_with_old_selections(cx: &mut TestAppContext) {
                 MultiBufferOffset(9)..MultiBufferOffset(9),
                 MultiBufferOffset(15)..MultiBufferOffset(15)
             ],
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_mixed_indentation_prefixes_are_preserved(cx: &mut TestAppContext) {
+    init_test(cx, |settings| {
+        settings.defaults.tab_size = NonZeroU32::new(4);
+        settings.defaults.hard_tabs = Some(true);
+        settings.defaults.auto_indent = Some(language_settings::AutoIndentMode::PreserveIndent);
+        settings.defaults.allow_rewrap = Some(language_settings::RewrapBehavior::Anywhere);
+    });
+
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("\t  ˇline");
+    cx.update_editor(|editor, window, cx| editor.backspace(&Backspace, window, cx));
+    cx.assert_editor_state("\tˇline");
+
+    cx.set_state("  ˇ\tline");
+    cx.update_editor(|editor, window, cx| editor.tab(&Tab, window, cx));
+    cx.assert_editor_state("\t\tˇline");
+
+    cx.set_state("  \tlineˇ");
+    cx.update_editor(|editor, window, cx| editor.newline(&Newline, window, cx));
+    cx.assert_editor_state("  \tline\n  \tˇ");
+
+    cx.set_state("  \tlineˇ");
+    cx.update_editor(|editor, _, cx| editor.rewrap(RewrapOptions::default(), cx));
+    cx.assert_editor_state("  \tlineˇ");
+
+    cx.update_editor(|editor, _, cx| {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        assert_eq!(
+            snapshot.indent_and_comment_for_line(MultiBufferRow(0), cx),
+            "  \t"
         );
     });
 }
@@ -32679,7 +32715,11 @@ fn indent_guide(buffer_id: BufferId, start_row: u32, end_row: u32, depth: u32) -
         start_row: MultiBufferRow(start_row),
         end_row: MultiBufferRow(end_row),
         depth,
-        tab_size: 4,
+        indentation: IndentationSettings::new(
+            NonZeroU32::new(4).unwrap(),
+            NonZeroU32::new(4).unwrap(),
+            false,
+        ),
         settings: IndentGuideSettings {
             enabled: true,
             line_width: 1,
@@ -49881,7 +49921,7 @@ async fn test_display_row_for_inline_code_action(cx: &mut gpui::TestAppContext) 
     // Buffer point at column 26 (the '7').
     let buffer_point = Point::new(0, 26);
 
-    let display_row = snapshot.display_row_for_inline_code_action(buffer_point);
+    let display_row = cx.update(|cx| snapshot.display_row_for_inline_code_action(buffer_point, cx));
 
     // With SoftWrapIndent::None, the wrapped line has 0 indent (0 < 4),
     // so it should snap back to the start of the physical line (DisplayRow 0).
@@ -49899,7 +49939,7 @@ async fn test_display_row_for_inline_code_action(cx: &mut gpui::TestAppContext) 
         .update(cx, |editor, window, cx| editor.snapshot(window, cx))
         .unwrap();
 
-    let display_row = snapshot.display_row_for_inline_code_action(buffer_point);
+    let display_row = cx.update(|cx| snapshot.display_row_for_inline_code_action(buffer_point, cx));
 
     // With SoftWrapIndent::Same, there is enough space in the gutter,
     // so it should render on the wrapped display row (DisplayRow 1).
@@ -49928,7 +49968,7 @@ async fn test_display_row_for_inline_code_action(cx: &mut gpui::TestAppContext) 
         .unwrap();
 
     let buffer_point = Point::new(0, 26);
-    let display_row = snapshot.display_row_for_inline_code_action(buffer_point);
+    let display_row = cx.update(|cx| snapshot.display_row_for_inline_code_action(buffer_point, cx));
 
     // Physical line 0 has 2 spaces indent (< 4), but wrapped DisplayRow(1) has 6 spaces (>= 4).
     // The code action helper should stay on physical line 0 and render on DisplayRow(1).
@@ -49980,14 +50020,14 @@ async fn test_display_row_for_inline_code_action_with_block_above(cx: &mut gpui:
     // continuation. The line has 0 indent (< 4) and the cursor is not on a
     // wrapped continuation, so no valid row exists in this single-line buffer.
     assert_eq!(
-        snapshot.display_row_for_inline_code_action(Point::new(0, 5)),
+        cx.update(|cx| snapshot.display_row_for_inline_code_action(Point::new(0, 5), cx)),
         None
     );
 
     // Cursor at column 26 is on the soft-wrapped continuation row (DisplayRow 2).
     // It has 4 spaces of continuation indent (>= 4), so the code action is placed here.
     assert_eq!(
-        snapshot.display_row_for_inline_code_action(Point::new(0, 26)),
+        cx.update(|cx| snapshot.display_row_for_inline_code_action(Point::new(0, 26), cx)),
         Some(DisplayRow(2))
     );
 }
