@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, Task, WeakEntity};
+use gpui::{Context, Entity, EventEmitter, Task, WeakEntity};
 use livekit_client::{ConnectionQuality, RemoteAudioPlaybackStats};
 use serde::{Serialize, Serializer};
 use std::{
@@ -74,6 +74,13 @@ pub struct CallDiagnostics {
     room: WeakEntity<Room>,
     poll_task: Option<Task<()>>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallDiagnosticsEvent {
+    EffectiveQualityChanged,
+}
+
+impl EventEmitter<CallDiagnosticsEvent> for CallDiagnostics {}
 
 impl CallDiagnostics {
     pub fn new(room: WeakEntity<Room>, cx: &mut Context<Self>) -> Self {
@@ -202,11 +209,16 @@ impl CallDiagnostics {
         let Some(snapshot) = result.snapshot else {
             return;
         };
+        let effective_quality_changed = self.stats.effective_quality.map(|quality| quality.0)
+            != snapshot.stats.effective_quality.map(|quality| quality.0);
         self.stats = snapshot.stats.clone();
         if self.history.len() + 1 > MAX_HISTORY_SAMPLES {
             self.history.pop_front();
         }
         self.history.push_back(Arc::new(snapshot));
+        if effective_quality_changed {
+            cx.emit(CallDiagnosticsEvent::EffectiveQualityChanged);
+        }
         cx.notify();
     }
 }
@@ -564,6 +576,10 @@ fn effective_connection_quality(
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{AppContext as _, TestAppContext};
+
     use super::*;
 
     #[test]
@@ -587,5 +603,65 @@ mod tests {
         assert!(serialized.contains("participant-1"));
         assert!(serialized.contains("audio-track-1"));
         Ok(())
+    }
+
+    #[gpui::test]
+    fn test_only_emits_event_when_effective_quality_changes(cx: &mut TestAppContext) {
+        let diagnostics = cx.new(|_| CallDiagnostics {
+            stats: CallStats::default(),
+            history: VecDeque::with_capacity(MAX_HISTORY_SAMPLES),
+            previous_inbound: HashMap::default(),
+            participant_ids: HashMap::default(),
+            track_ids: HashMap::default(),
+            started_at: Instant::now(),
+            room: WeakEntity::new_invalid(),
+            poll_task: None,
+        });
+        let notification_count = Rc::new(Cell::new(0));
+        let quality_event_count = Rc::new(Cell::new(0));
+
+        cx.update(|cx| {
+            cx.observe(&diagnostics, {
+                let notification_count = notification_count.clone();
+                move |_, _| notification_count.set(notification_count.get() + 1)
+            })
+            .detach();
+            cx.subscribe(&diagnostics, {
+                let quality_event_count = quality_event_count.clone();
+                move |_, _, _| quality_event_count.set(quality_event_count.get() + 1)
+            })
+            .detach();
+        });
+
+        let poll_result = |latency_ms, effective_quality| PollResult {
+            snapshot: Some(CallDiagnosticsSnapshot {
+                elapsed: DurationDTO::default(),
+                stats: CallStats {
+                    effective_quality: Some(ConnectionQualityDTO(effective_quality)),
+                    latency_ms: Some(latency_ms),
+                    ..Default::default()
+                },
+                remote_audio: Vec::new(),
+            }),
+            previous_inbound: HashMap::default(),
+        };
+
+        diagnostics.update(cx, |diagnostics, cx| {
+            diagnostics.apply_poll_result(poll_result(50.0, ConnectionQuality::Excellent), cx);
+        });
+        assert_eq!(notification_count.get(), 1);
+        assert_eq!(quality_event_count.get(), 1);
+
+        diagnostics.update(cx, |diagnostics, cx| {
+            diagnostics.apply_poll_result(poll_result(75.0, ConnectionQuality::Excellent), cx);
+        });
+        assert_eq!(notification_count.get(), 2);
+        assert_eq!(quality_event_count.get(), 1);
+
+        diagnostics.update(cx, |diagnostics, cx| {
+            diagnostics.apply_poll_result(poll_result(150.0, ConnectionQuality::Poor), cx);
+        });
+        assert_eq!(notification_count.get(), 3);
+        assert_eq!(quality_event_count.get(), 2);
     }
 }
