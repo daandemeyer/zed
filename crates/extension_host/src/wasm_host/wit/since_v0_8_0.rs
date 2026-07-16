@@ -974,6 +974,7 @@ impl ExtensionImports for WasmState {
                         AllLanguageSettings::get(location, cx).language(location, key.as_ref(), cx);
                     Ok(serde_json::to_string(&settings::LanguageSettings {
                         tab_size: settings.tab_size,
+                        tab_width: settings.tab_width,
                         hard_tabs: settings.hard_tabs,
                         preferred_line_length: settings.preferred_line_length,
                     })?)
