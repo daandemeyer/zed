@@ -1,4 +1,4 @@
-use gpui::{Context, Task, WeakEntity};
+use gpui::{Context, EventEmitter, Task, WeakEntity};
 use livekit_client::ConnectionQuality;
 use std::time::Duration;
 
@@ -20,6 +20,13 @@ pub struct CallDiagnostics {
     poll_task: Option<Task<()>>,
     stats_update_task: Option<Task<()>>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallDiagnosticsEvent {
+    EffectiveQualityChanged,
+}
+
+impl EventEmitter<CallDiagnosticsEvent> for CallDiagnostics {}
 
 impl CallDiagnostics {
     pub fn new(room: WeakEntity<Room>, cx: &mut Context<Self>) -> Self {
@@ -76,12 +83,25 @@ impl CallDiagnostics {
                     .stats
                     .connection_quality
                     .unwrap_or(ConnectionQuality::Lost);
-                this.stats.effective_quality =
-                    Some(effective_connection_quality(quality, &this.stats));
-                cx.notify();
+                this.update_effective_quality(quality, cx);
             })
             .ok();
         }));
+    }
+
+    fn update_effective_quality(
+        &mut self,
+        connection_quality: ConnectionQuality,
+        cx: &mut Context<Self>,
+    ) {
+        let effective_quality = effective_connection_quality(connection_quality, &self.stats);
+        let quality_changed = self.stats.effective_quality != Some(effective_quality);
+        self.stats.effective_quality = Some(effective_quality);
+
+        if quality_changed {
+            cx.emit(CallDiagnosticsEvent::EffectiveQualityChanged);
+        }
+        cx.notify();
     }
 }
 
@@ -229,4 +249,59 @@ fn effective_connection_quality(
     }
 
     worst
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{AppContext as _, TestAppContext};
+
+    use super::*;
+
+    #[gpui::test]
+    fn test_only_emits_event_when_effective_quality_changes(cx: &mut TestAppContext) {
+        let diagnostics = cx.new(|_| CallDiagnostics {
+            stats: CallStats::default(),
+            room: WeakEntity::new_invalid(),
+            poll_task: None,
+            stats_update_task: None,
+        });
+        let notification_count = Rc::new(Cell::new(0));
+        let quality_event_count = Rc::new(Cell::new(0));
+
+        cx.update(|cx| {
+            cx.observe(&diagnostics, {
+                let notification_count = notification_count.clone();
+                move |_, _| notification_count.set(notification_count.get() + 1)
+            })
+            .detach();
+            cx.subscribe(&diagnostics, {
+                let quality_event_count = quality_event_count.clone();
+                move |_, _, _| quality_event_count.set(quality_event_count.get() + 1)
+            })
+            .detach();
+        });
+
+        diagnostics.update(cx, |diagnostics, cx| {
+            diagnostics.stats.latency_ms = Some(50.0);
+            diagnostics.update_effective_quality(ConnectionQuality::Excellent, cx);
+        });
+        assert_eq!(notification_count.get(), 1);
+        assert_eq!(quality_event_count.get(), 1);
+
+        diagnostics.update(cx, |diagnostics, cx| {
+            diagnostics.stats.latency_ms = Some(75.0);
+            diagnostics.update_effective_quality(ConnectionQuality::Excellent, cx);
+        });
+        assert_eq!(notification_count.get(), 2);
+        assert_eq!(quality_event_count.get(), 1);
+
+        diagnostics.update(cx, |diagnostics, cx| {
+            diagnostics.stats.latency_ms = Some(150.0);
+            diagnostics.update_effective_quality(ConnectionQuality::Excellent, cx);
+        });
+        assert_eq!(notification_count.get(), 3);
+        assert_eq!(quality_event_count.get(), 2);
+    }
 }
