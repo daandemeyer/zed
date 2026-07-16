@@ -503,6 +503,14 @@ pub struct GitSettings {
     ///
     /// Default: ../worktrees
     pub worktree_directory: String,
+    /// Command that creates a linked worktree in place of `git worktree add`.
+    ///
+    /// Default: None
+    pub worktree_create_command: Option<Vec<String>>,
+    /// Command that removes a linked worktree in place of `git worktree remove`.
+    ///
+    /// Default: None
+    pub worktree_remove_command: Option<Vec<String>>,
     /// Settings for automatically fetching the default branch's remote and the current branch's upstream remote.
     pub auto_fetch: AutoFetchSettings,
 }
@@ -741,6 +749,14 @@ impl Settings for ProjectSettings {
                     interval_secs: auto_fetch.interval_secs.unwrap_or(60).max(15),
                 }
             },
+            worktree_create_command: git
+                .worktree_create_command
+                .clone()
+                .filter(|command| !command.is_empty()),
+            worktree_remove_command: git
+                .worktree_remove_command
+                .clone()
+                .filter(|command| !command.is_empty()),
         };
         Self {
             context_servers: project
