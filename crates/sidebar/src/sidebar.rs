@@ -847,6 +847,17 @@ impl Sidebar {
         cx.on_focus_in(&focus_handle, window, Self::focus_in)
             .detach();
 
+        let mut previous_side = AgentSettings::get_global(cx).sidebar_side();
+        cx.observe_global::<SettingsStore>(move |_, cx| {
+            let side = AgentSettings::get_global(cx).sidebar_side();
+            if side != previous_side {
+                previous_side = side;
+                cx.emit(workspace::SidebarEvent::LayoutChanged);
+                cx.notify();
+            }
+        })
+        .detach();
+
         AgentThreadWorktreeLabelFlag::watch(cx);
 
         let mut previous_default_width =
@@ -2071,9 +2082,7 @@ impl Sidebar {
         self.prefetch_worktree_default_branches(cx);
 
         if had_notifications != self.has_notifications(cx) {
-            multi_workspace.update(cx, |_, cx| {
-                cx.notify();
-            });
+            cx.emit(workspace::SidebarEvent::NotificationStateChanged);
         }
 
         cx.notify();
@@ -7773,6 +7782,7 @@ impl Sidebar {
         self._subscriptions.push(subscription);
         self.view = SidebarView::Archive(archive_view.clone());
         archive_view.update(cx, |view, cx| view.focus_filter_editor(window, cx));
+        cx.emit(workspace::SidebarEvent::ActiveViewChanged);
         self.serialize(cx);
         cx.notify();
     }
@@ -7782,6 +7792,7 @@ impl Sidebar {
         self._subscriptions.clear();
         let handle = self.filter_editor.read(cx).focus_handle(cx);
         handle.focus(window, cx);
+        cx.emit(workspace::SidebarEvent::ActiveViewChanged);
         self.serialize(cx);
         cx.notify();
     }
@@ -7860,9 +7871,14 @@ impl WorkspaceSidebar for Sidebar {
     fn set_width(&mut self, width: Option<Pixels>, cx: &mut Context<Self>) {
         // `None` is the reset gesture, which hands the width back to the setting.
         self.width_set_by_user = width.is_some();
-        self.width = width
+        let width = width
             .unwrap_or_else(|| AgentSettings::get_global(cx).threads_sidebar.default_width)
             .clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH);
+        if self.width == width {
+            return;
+        }
+        self.width = width;
+        cx.emit(workspace::SidebarEvent::LayoutChanged);
         cx.notify();
     }
 
@@ -7924,8 +7940,12 @@ impl WorkspaceSidebar for Sidebar {
                 .width
                 .filter(|width| serialized.width_set_by_user || *width != 300.0)
             {
-                self.width = px(width).clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH);
+                let width = px(width).clamp(THREADS_LIST_MIN_WIDTH, THREADS_LIST_MAX_WIDTH);
                 self.width_set_by_user = true;
+                if self.width != width {
+                    self.width = width;
+                    cx.emit(workspace::SidebarEvent::LayoutChanged);
+                }
             }
             if serialized.active_view == SerializedSidebarView::History {
                 cx.defer_in(window, |this, window, cx| {
