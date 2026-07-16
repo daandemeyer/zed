@@ -5445,6 +5445,7 @@ impl AgentPanel {
                                     .with_easing(pulsating_between(0.4, 0.8)),
                                 |label, delta| label.alpha(delta),
                             )
+                            .with_max_fps(15)
                             .into_any_element()
                     } else {
                         let editable_title = div()
@@ -6134,6 +6135,7 @@ impl AgentPanel {
                         .with_easing(pulsating_between(0.2, 0.6)),
                     |icon, delta| icon.opacity(delta),
                 )
+                .with_max_fps(15)
                 .into_any_element()
         } else {
             selected_agent.into_any_element()
