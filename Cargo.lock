@@ -19379,6 +19379,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "ui_macros",
+ "unicode-segmentation",
  "web-time",
 ]
 
