@@ -185,6 +185,7 @@ impl AddToolchainState {
                                                     .with_easing(pulsating_between(0.4, 0.8)),
                                                 |label, delta| label.alpha(delta),
                                             )
+                                            .with_max_fps(15)
                                             .into_any()
                                         } else {
                                             this.into_any_element()
@@ -523,6 +524,7 @@ impl Render for AddToolchainState {
                                                             )),
                                                             |label, delta| label.alpha(delta),
                                                         )
+                                                        .with_max_fps(15)
                                                         .into_any()
                                                     } else {
                                                         this.into_any_element()
