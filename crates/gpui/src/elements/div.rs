@@ -2669,8 +2669,8 @@ impl Interactivity {
                     if phase == DispatchPhase::Capture && group_hovered != was_group_hovered {
                         if let Some(hover_state) = &hover_state {
                             hover_state.borrow_mut().group = group_hovered;
+                            cx.notify(current_view);
                         }
-                        cx.notify(current_view);
                     }
                 });
             }
@@ -4116,7 +4116,60 @@ mod tests {
         AnyWindowHandle, AppContext as _, Context, InputEvent, Keystroke, MouseMoveEvent,
         TestAppContext, util::FluentBuilder as _,
     };
-    use std::rc::Weak;
+    use std::{cell::Cell, rc::Weak};
+
+    struct AnonymousGroupHover(Rc<Cell<usize>>);
+
+    impl Render for AnonymousGroupHover {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.set(self.0.get() + 1);
+            div().size_full().child(
+                div()
+                    .ml(px(20.))
+                    .mt(px(20.))
+                    .size(px(50.))
+                    .group("anonymous-group")
+                    .child(
+                        div()
+                            .size_full()
+                            .group_hover("anonymous-group", |style| style.opacity(0.5)),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn anonymous_group_hover_only_refreshes_on_transitions(cx: &mut TestAppContext) {
+        let render_count = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let render_count = render_count.clone();
+            move |_, _| AnonymousGroupHover(render_count)
+        });
+        let window = AnyWindowHandle::from(window);
+
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+
+        let move_mouse = |cx: &mut TestAppContext, position| {
+            cx.update_window(window, |_, window, cx| {
+                window.simulate_mouse_move(position, cx)
+            })
+            .unwrap();
+        };
+
+        let initial_render_count = render_count.get();
+        move_mouse(cx, point(px(25.), px(25.)));
+        assert_eq!(render_count.get(), initial_render_count + 1);
+
+        move_mouse(cx, point(px(30.), px(30.)));
+        assert_eq!(render_count.get(), initial_render_count + 1);
+
+        move_mouse(cx, point(px(5.), px(5.)));
+        assert_eq!(render_count.get(), initial_render_count + 2);
+
+        move_mouse(cx, point(px(10.), px(10.)));
+        assert_eq!(render_count.get(), initial_render_count + 2);
+    }
 
     struct TestTooltipView;
 
