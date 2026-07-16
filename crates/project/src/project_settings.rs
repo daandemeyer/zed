@@ -503,6 +503,14 @@ pub struct GitSettings {
     ///
     /// Default: ../worktrees
     pub worktree_directory: String,
+    /// Command that creates a linked worktree in place of `git worktree add`.
+    ///
+    /// Default: None
+    pub worktree_create_command: Option<Vec<String>>,
+    /// Command that removes a linked worktree in place of `git worktree remove`.
+    ///
+    /// Default: None
+    pub worktree_remove_command: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -719,6 +727,14 @@ impl Settings for ProjectSettings {
                 .worktree_directory
                 .clone()
                 .unwrap_or_else(|| DEFAULT_WORKTREE_DIRECTORY.to_string()),
+            worktree_create_command: git
+                .worktree_create_command
+                .clone()
+                .filter(|command| !command.is_empty()),
+            worktree_remove_command: git
+                .worktree_remove_command
+                .clone()
+                .filter(|command| !command.is_empty()),
         };
         Self {
             context_servers: project

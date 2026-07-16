@@ -74,6 +74,7 @@ use smol::future::yield_now;
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, HashSet, VecDeque, hash_map::Entry},
+    ffi::OsStr,
     future::Future,
     mem,
     ops::Range,
@@ -9279,6 +9280,7 @@ impl Repository {
         path: PathBuf,
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        let work_directory = self.work_directory_abs_path.clone();
         let job_description = match target.branch_name() {
             Some(branch_name) => format!("git worktree add: {branch_name}"),
             None => "git worktree add (detached)".to_string(),
@@ -9286,10 +9288,34 @@ impl Repository {
         self.send_job(
             "create_worktree",
             Some(job_description.into()),
-            move |repo, _cx| async move {
+            move |repo, cx| async move {
                 match repo {
-                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        backend.create_worktree(target, path).await
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        fs,
+                        environment,
+                    }) => {
+                        let create_command = cx.update(|cx| {
+                            ProjectSettings::get_global(cx)
+                                .git
+                                .worktree_create_command
+                                .clone()
+                        });
+                        match create_command {
+                            Some(create_command) => {
+                                create_worktree_with_command(
+                                    &create_command,
+                                    backend.as_ref(),
+                                    fs.as_ref(),
+                                    &environment,
+                                    &work_directory,
+                                    target,
+                                    path,
+                                )
+                                .await
+                            }
+                            None => backend.create_worktree(target, path).await,
+                        }
                     }
                     RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                         let (name, commit, use_existing_branch) = match target {
@@ -9578,12 +9604,17 @@ impl Repository {
     pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         let repository_anchor_path: Arc<Path> = self.linked_worktree_anchor_path().into();
+        let work_directory = self.work_directory_abs_path.clone();
         self.send_job(
             "remove_worktree",
             Some(format!("git worktree remove: {}", path.display()).into()),
             move |repo, cx| async move {
                 match repo {
-                    RepositoryState::Local(LocalRepositoryState { backend, fs, .. }) => {
+                    RepositoryState::Local(LocalRepositoryState {
+                        backend,
+                        fs,
+                        environment,
+                    }) => {
                         // When forcing, delete the worktree directory ourselves before
                         // invoking git. `git worktree remove` can remove the admin
                         // metadata in `.git/worktrees/<name>` but fail to delete the
@@ -9603,21 +9634,40 @@ impl Repository {
                         // Non-force removals are left untouched before git runs:
                         // `git worktree remove` must see the dirty working tree to
                         // refuse the operation.
-                        if force {
-                            fs.remove_dir(
-                                &path,
-                                RemoveOptions {
-                                    recursive: true,
-                                    ignore_if_not_exists: true,
-                                },
+                        let remove_command = cx.update(|cx| {
+                            ProjectSettings::get_global(cx)
+                                .git
+                                .worktree_remove_command
+                                .clone()
+                        });
+                        if let Some(remove_command) = remove_command {
+                            run_worktree_command(
+                                &remove_command,
+                                [path.as_os_str()],
+                                &work_directory,
+                                &environment,
                             )
-                            .await
-                            .with_context(|| {
-                                format!("failed to delete worktree directory '{}'", path.display())
-                            })?;
-                        }
+                            .await?;
+                        } else {
+                            if force {
+                                fs.remove_dir(
+                                    &path,
+                                    RemoveOptions {
+                                        recursive: true,
+                                        ignore_if_not_exists: true,
+                                    },
+                                )
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "failed to delete worktree directory '{}'",
+                                        path.display()
+                                    )
+                                })?;
+                            }
 
-                        backend.remove_worktree(path.clone(), force).await?;
+                            backend.remove_worktree(path.clone(), force).await?;
+                        }
 
                         let managed_worktree_base = cx.update(|cx| {
                             let setting = &ProjectSettings::get_global(cx).git.worktree_directory;
@@ -10895,6 +10945,80 @@ pub fn worktrees_directory_for_repo(
     }
 
     Ok(resolved)
+}
+
+async fn create_worktree_with_command(
+    command: &[String],
+    backend: &dyn GitRepository,
+    fs: &dyn Fs,
+    environment: &HashMap<String, String>,
+    work_directory: &Path,
+    target: CreateWorktreeTarget,
+    path: PathBuf,
+) -> Result<()> {
+    let (start_point, branch) = match target {
+        CreateWorktreeTarget::Detached { base_sha } => (base_sha, None),
+        CreateWorktreeTarget::NewBranch {
+            branch_name,
+            base_sha,
+        } => (base_sha, Some((branch_name, true))),
+        CreateWorktreeTarget::ExistingBranch { branch_name } => {
+            (Some(branch_name.clone()), Some((branch_name, false)))
+        }
+    };
+    let start_point = start_point.unwrap_or_else(|| "HEAD".to_string());
+    // The command gets a full SHA because jj and other tools can't resolve Git
+    // revisions such as `HEAD`.
+    let commit = backend
+        .revparse_batch(vec![start_point.clone()])
+        .await?
+        .into_iter()
+        .next()
+        .flatten()
+        .with_context(|| format!("failed to resolve '{start_point}' to a commit"))?;
+    if let Some(parent) = path.parent() {
+        fs.create_dir(parent).await?;
+    }
+    run_worktree_command(
+        command,
+        [path.as_os_str(), OsStr::new(&commit)],
+        work_directory,
+        environment,
+    )
+    .await?;
+    if let Some((branch_name, create)) = branch {
+        backend
+            .checkout_branch_in_worktree(branch_name, path, create)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn run_worktree_command<'a>(
+    command: &[String],
+    arguments: impl IntoIterator<Item = &'a OsStr>,
+    work_directory: &Path,
+    environment: &HashMap<String, String>,
+) -> Result<()> {
+    let (program, command_arguments) =
+        command.split_first().context("worktree command is empty")?;
+    let output = util::command::new_command(program)
+        .args(command_arguments)
+        .args(arguments)
+        .envs(environment)
+        .current_dir(work_directory)
+        .output()
+        .await
+        .with_context(|| format!("failed to run '{program}'"))?;
+    if !output.status.success() {
+        bail!(
+            "'{}' failed with {}: {}",
+            command.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 async fn remove_empty_managed_worktree_ancestors(fs: &dyn Fs, child_path: &Path, base_path: &Path) {

@@ -3590,6 +3590,54 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_painted_inline_terminal_keeps_no_cell_snapshot(cx: &mut TestAppContext) {
+        let (project, workspace) = init_test(cx).await;
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                CursorShape::default(),
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let (terminal_view, cx) = cx.add_window_view(|window, cx| {
+            let mut terminal_view = TerminalView::new(
+                terminal.clone(),
+                workspace.downgrade(),
+                None,
+                project.downgrade(),
+                window,
+                cx,
+            );
+            terminal_view.set_embedded_mode(Some(1000), cx);
+            terminal_view
+        });
+        terminal.update(cx, |terminal, cx| {
+            for _ in 0..50 {
+                terminal.write_output(b"line\n", cx);
+            }
+        });
+
+        for _ in 0..2 {
+            cx.draw(
+                gpui::Point::default(),
+                gpui::size(px(400.), px(2000.)),
+                |_, _| terminal_view.clone().into_any_element(),
+            );
+            terminal.read_with(cx, |terminal, _| {
+                assert_eq!(terminal.viewport_lines(), terminal.total_lines());
+                assert!(
+                    terminal.last_content.cells.is_empty(),
+                    "a painted terminal should not keep the cells of its last frame"
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
     async fn test_inline_terminal_shrinks_after_clear(cx: &mut TestAppContext) {
         let (project, workspace) = init_test(cx).await;
         let terminal = cx.new(|cx| {

@@ -6199,6 +6199,29 @@ Trailing slashes are ignored.
 }
 ```
 
+## Git Worktree Create Command
+
+- Description: Command that creates a linked worktree in place of `git worktree add`, given as a program followed by its arguments.
+- Setting: `git.worktree_create_command`
+- Default: `null`
+
+Zed appends the path of the new worktree and the full SHA of the commit to check out, and runs the command in the repository's working directory.
+The command must leave a Git linked worktree at the path.
+Zed only reads this setting from user settings.
+See [Create Worktrees with Another Tool](../git.md#create-worktrees-with-another-tool) for a Jujutsu example.
+
+## Git Worktree Remove Command
+
+- Description: Command that removes a linked worktree in place of `git worktree remove`, given as a program followed by its arguments.
+- Setting: `git.worktree_remove_command`
+- Default: `null`
+
+Zed appends the path of the worktree and runs the command in the repository's working directory.
+The command must delete the worktree directory and its Git metadata.
+Zed doesn't delete the directory itself when this setting is set.
+Zed runs the command even when the worktree contains uncommitted changes.
+Zed only reads this setting from user settings.
+
 ## Git Hosting Providers
 
 - Description: Register self-hosted GitHub, GitLab, or Bitbucket instances so commit hashes, issue references, and permalinks resolve to the right host.
