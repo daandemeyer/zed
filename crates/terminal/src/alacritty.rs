@@ -829,6 +829,22 @@ pub(super) fn shrink_to_used(term: &mut Term<ZedListener>) {
     term.grid_mut().truncate();
 }
 
+/// Returns the hyperlink of the cell at `row` and `column` of the viewport.
+pub(super) fn hyperlink_in_viewport(
+    term: &Term<ZedListener>,
+    row: usize,
+    column: usize,
+) -> Option<Hyperlink> {
+    let grid = term.grid();
+    let line = Line(row as i32 - grid.display_offset() as i32);
+    if line > grid.bottommost_line() || column >= grid.columns() {
+        return None;
+    }
+    grid[AlacPoint::new(line, Column(column))]
+        .hyperlink()
+        .map(terminal_hyperlink_from_alacritty)
+}
+
 pub(super) fn used_lines(term: &Term<ZedListener>) -> usize {
     if term.mode().contains(TermMode::ALT_SCREEN) {
         return term.total_lines();

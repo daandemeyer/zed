@@ -1550,6 +1550,13 @@ impl Element for TerminalElement {
                     None
                 };
 
+                // `Terminal::sync` builds a new cell snapshot for every frame. An embedded
+                // terminal is as tall as its output, so a snapshot that stays in memory between
+                // frames holds every cell of every agent terminal card that was ever painted.
+                self.terminal.update(cx, |terminal, _| {
+                    terminal.last_content.cells = Vec::new();
+                });
+
                 LayoutState {
                     hitbox,
                     batched_text_runs,

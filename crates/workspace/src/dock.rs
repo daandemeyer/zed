@@ -29,6 +29,7 @@ pub enum PanelEvent {
     ZoomOut,
     Activate,
     Close,
+    ChromeChanged,
 }
 
 pub use proto::PanelId;
@@ -383,7 +384,7 @@ pub struct PanelSizeState {
 struct PanelEntry {
     panel: Arc<dyn PanelHandle>,
     size_state: PanelSizeState,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 3],
 }
 
 pub struct PanelButtons {
@@ -632,7 +633,6 @@ impl Dock {
         cx: &mut Context<Self>,
     ) -> usize {
         let subscriptions = [
-            cx.observe(&panel, |_, _, cx| cx.notify()),
             cx.observe_global_in::<SettingsStore>(window, {
                 let workspace = workspace.clone();
                 let panel = panel.clone();
@@ -775,6 +775,7 @@ impl Dock {
                             this.set_open(false, window, cx);
                         }
                     }
+                    PanelEvent::ChromeChanged => cx.notify(),
                 },
             ),
         ];
