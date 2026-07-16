@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{cell::Cell, path::PathBuf, rc::Rc};
 
 use super::*;
 use crate::item::test::TestItem;
@@ -18,6 +18,90 @@ fn init_test(cx: &mut TestAppContext) {
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         DisableAiSettings::register(cx);
     });
+}
+
+struct TestSidebar {
+    focus_handle: FocusHandle,
+}
+
+impl TestSidebar {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+        }
+    }
+}
+
+impl EventEmitter<SidebarEvent> for TestSidebar {}
+
+impl Focusable for TestSidebar {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for TestSidebar {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+impl Sidebar for TestSidebar {
+    fn width(&self, _cx: &App) -> Pixels {
+        px(300.)
+    }
+
+    fn set_width(&mut self, _width: Option<Pixels>, _cx: &mut Context<Self>) {}
+
+    fn has_notifications(&self, _cx: &App) -> bool {
+        false
+    }
+
+    fn side(&self, _cx: &App) -> SidebarSide {
+        SidebarSide::Left
+    }
+}
+
+#[gpui::test]
+async fn test_sidebar_notifications_only_fan_out_for_parent_state(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let sidebar = cx.update(|_, cx| cx.new(TestSidebar::new));
+    multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.register_sidebar(sidebar.clone(), cx);
+    });
+    cx.run_until_parked();
+
+    let notification_count = Rc::new(Cell::new(0));
+    cx.update({
+        let multi_workspace = multi_workspace.clone();
+        let notification_count = notification_count.clone();
+        move |_, cx| {
+            cx.observe(&multi_workspace, move |_, _| {
+                notification_count.set(notification_count.get() + 1);
+            })
+            .detach();
+        }
+    });
+
+    sidebar.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(notification_count.get(), 0);
+
+    sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::LayoutChanged));
+    cx.run_until_parked();
+    assert_eq!(notification_count.get(), 1);
+
+    sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::NotificationStateChanged));
+    cx.run_until_parked();
+    assert_eq!(notification_count.get(), 2);
+
+    sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::ActiveViewChanged));
+    cx.run_until_parked();
+    assert_eq!(notification_count.get(), 3);
 }
 
 #[gpui::test]

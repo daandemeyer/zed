@@ -611,6 +611,7 @@ pub struct ConversationView {
     /// Cache + worktree snapshot for resolving paths in markdown code spans.
     /// Shared with the child [`ThreadView`] when one is constructed.
     pub(crate) code_span_resolver: AgentCodeSpanResolver,
+    elapsed_label_tracker: ElapsedLabelTracker,
     request_elicitation_form_states: HashMap<ElicitationEntryId, ElicitationFormState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -888,6 +889,7 @@ impl ConversationView {
             last_theme_id: Some(cx.theme().id.clone()),
             draft_prompt_persist_task: None,
             code_span_resolver,
+            elapsed_label_tracker: ElapsedLabelTracker::default(),
             request_elicitation_form_states: HashMap::default(),
             _subscriptions: subscriptions,
             focus_handle: cx.focus_handle(),
@@ -1422,6 +1424,7 @@ impl ConversationView {
                 self.code_span_resolver.clone(),
                 self.thread_store.clone(),
                 initial_content,
+                self.elapsed_label_tracker.clone(),
                 subscriptions,
                 window,
                 cx,
@@ -3320,13 +3323,16 @@ impl Render for ConversationView {
                     .items_center()
                     .justify_center()
                     .child(
-                        Label::new(label_text).color(Color::Muted).with_animation(
-                            "loading-agent-label",
-                            Animation::new(Duration::from_secs(2))
-                                .repeat()
-                                .with_easing(pulsating_between(0.3, 0.7)),
-                            |label, delta| label.alpha(delta),
-                        ),
+                        Label::new(label_text)
+                            .color(Color::Muted)
+                            .with_animation(
+                                "loading-agent-label",
+                                Animation::new(Duration::from_secs(2))
+                                    .repeat()
+                                    .with_easing(pulsating_between(0.3, 0.7)),
+                                |label, delta| label.alpha(delta),
+                            )
+                            .with_max_fps(15),
                     )
                     .into_any()
             }
@@ -3614,6 +3620,7 @@ pub(crate) mod tests {
     use serde_json::json;
     use settings::SettingsStore;
     use std::any::Any;
+    use std::cell::Cell;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
@@ -3650,6 +3657,34 @@ pub(crate) mod tests {
         let weak_view = conversation_view.downgrade();
         drop(conversation_view);
         assert!(!weak_view.is_upgradable());
+    }
+
+    #[gpui::test]
+    async fn test_turn_timer_skips_hidden_elapsed_labels(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        let thread_view = active_thread(&conversation_view, cx);
+        let notification_count = Rc::new(Cell::new(0));
+        cx.update({
+            let notification_count = notification_count.clone();
+            let thread_view = thread_view.clone();
+            move |_, cx| {
+                cx.observe(&thread_view, move |_, _| {
+                    notification_count.set(notification_count.get() + 1)
+                })
+                .detach();
+            }
+        });
+
+        let generation = thread_view.update(cx, |thread_view, cx| thread_view.start_turn(cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(31));
+        cx.run_until_parked();
+
+        assert_eq!(notification_count.get(), 0);
+        thread_view.update(cx, |thread_view, cx| thread_view.stop_turn(generation, cx));
     }
 
     #[gpui::test]
