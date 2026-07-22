@@ -34,6 +34,15 @@ fn format_stat(value: Option<f64>, format: impl Fn(f64) -> String) -> String {
     }
 }
 
+fn call_quality_display(quality: ConnectionQuality) -> (IconName, Option<Color>, &'static str) {
+    match quality {
+        ConnectionQuality::Excellent => (IconName::SignalHigh, Some(Color::Success), "Excellent"),
+        ConnectionQuality::Good => (IconName::SignalHigh, None, "Good"),
+        ConnectionQuality::Poor => (IconName::SignalMedium, Some(Color::Warning), "Poor"),
+        ConnectionQuality::Lost => (IconName::SignalLow, Some(Color::Error), "Lost"),
+    }
+}
+
 pub fn toggle_screen_sharing(
     screen: anyhow::Result<Option<Rc<dyn ScreenCaptureSource>>>,
     window: &mut Window,
@@ -363,27 +372,18 @@ impl TitleBar {
         let can_share_projects = room.can_share_projects();
         let screen_sharing_supported = cx.is_screen_capture_supported();
 
-        let stats = room
-            .diagnostics()
-            .map(|d| d.read(cx).stats().clone())
-            .unwrap_or_default();
+        let diagnostics = room.diagnostics().cloned();
 
         let channel_store = ChannelStore::global(cx);
         let channel = room
             .channel_id()
             .and_then(|channel_id| channel_store.read(cx).channel_for_id(channel_id).cloned());
 
-        let effective_quality = stats.effective_quality.unwrap_or(ConnectionQuality::Lost);
-        let (signal_icon, signal_color, quality_label) = match effective_quality {
-            ConnectionQuality::Excellent => {
-                (IconName::SignalHigh, Some(Color::Success), "Excellent")
-            }
-            ConnectionQuality::Good => (IconName::SignalHigh, None, "Good"),
-            ConnectionQuality::Poor => (IconName::SignalMedium, Some(Color::Warning), "Poor"),
-            ConnectionQuality::Lost => (IconName::SignalLow, Some(Color::Error), "Lost"),
-        };
-
-        let quality_label: SharedString = quality_label.into();
+        let effective_quality = diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.read(cx).stats().effective_quality)
+            .unwrap_or(ConnectionQuality::Lost);
+        let (signal_icon, signal_color, _) = call_quality_display(effective_quality);
 
         h_flex()
             .gap_1()
@@ -408,7 +408,13 @@ impl TitleBar {
                     .icon_size(IconSize::Small)
                     .when_some(signal_color, |button, color| button.icon_color(color))
                     .tooltip(Tooltip::element(move |window, cx| {
-                        let quality_label = quality_label.clone();
+                        let stats = diagnostics
+                            .as_ref()
+                            .map(|diagnostics| diagnostics.read(cx).stats().clone())
+                            .unwrap_or_default();
+                        let (_, _, quality_label) = call_quality_display(
+                            stats.effective_quality.unwrap_or(ConnectionQuality::Lost),
+                        );
                         let latency = format_stat(stats.latency_ms, |v| format!("{:.0}ms", v));
                         let jitter = format_stat(stats.jitter_ms, |v| format!("{:.0}ms", v));
                         let packet_loss =

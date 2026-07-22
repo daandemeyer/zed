@@ -22,7 +22,7 @@ use crate::application_menu::{
 };
 
 use auto_update::AutoUpdateStatus;
-use call::ActiveCall;
+use call::{ActiveCall, diagnostics::CallDiagnosticsEvent};
 use client::{Client, UserStore, zed_urls};
 use command_palette_hooks::CommandPaletteFilter;
 
@@ -1128,7 +1128,10 @@ impl TitleBar {
             .and_then(|room| room.read(cx).diagnostics().cloned());
 
         if let Some(diagnostics) = diagnostics {
-            self._diagnostics_subscription = Some(cx.observe(&diagnostics, |_, _, cx| cx.notify()));
+            self._diagnostics_subscription = Some(cx.subscribe(&diagnostics, |_, _, event, cx| {
+                let CallDiagnosticsEvent::EffectiveQualityChanged = event;
+                cx.notify();
+            }));
         } else {
             self._diagnostics_subscription = None;
         }
