@@ -15143,6 +15143,36 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_panel_updates_only_notify_dock_for_chrome_changes(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        let dock = workspace.read_with(cx, |workspace, _| workspace.left_dock());
+        let dock_notifications = Rc::new(Cell::new(0));
+
+        workspace.update_in(cx, |_, window, cx| {
+            let dock_notifications = dock_notifications.clone();
+            cx.observe_in(&dock, window, move |_, _, _, _| {
+                dock_notifications.set(dock_notifications.get() + 1);
+            })
+            .detach();
+        });
+
+        panel.update(cx, |_, cx| cx.notify());
+        assert_eq!(dock_notifications.get(), 0);
+
+        panel.update(cx, |_, cx| cx.emit(PanelEvent::ChromeChanged));
+        assert_eq!(dock_notifications.get(), 1);
+    }
+
+    #[gpui::test]
     async fn test_no_save_prompt_when_multi_buffer_dirty_items_closed(cx: &mut TestAppContext) {
         init_test(cx);
 
