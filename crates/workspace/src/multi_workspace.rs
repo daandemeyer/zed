@@ -115,6 +115,9 @@ pub enum MultiWorkspaceEvent {
 }
 
 pub enum SidebarEvent {
+    ActiveViewChanged,
+    LayoutChanged,
+    NotificationStateChanged,
     SerializeNeeded,
 }
 
@@ -386,16 +389,18 @@ impl MultiWorkspace {
 
     pub fn register_sidebar<T: Sidebar>(&mut self, sidebar: Entity<T>, cx: &mut Context<Self>) {
         self._subscriptions
-            .push(cx.observe(&sidebar, |_this, _, cx| {
-                cx.notify();
-            }));
-        self._subscriptions
             .push(cx.subscribe(&sidebar, |this, _, event, cx| match event {
+                SidebarEvent::ActiveViewChanged
+                | SidebarEvent::LayoutChanged
+                | SidebarEvent::NotificationStateChanged => {
+                    cx.notify();
+                }
                 SidebarEvent::SerializeNeeded => {
                     this.serialize(cx);
                 }
             }));
         self.sidebar = Some(Box::new(sidebar));
+        cx.notify();
     }
 
     pub fn sidebar(&self) -> Option<&dyn SidebarHandle> {
