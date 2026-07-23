@@ -3,8 +3,9 @@ use crate::{
     sidebar_side_context_menu,
 };
 use gpui::{
-    Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
+    Anchor, AnyView, App, Context, Decorations, Entity, EntityId, FocusHandle, Focusable,
+    IntoElement, ParentElement, Render, Role, SharedString, Styled, Subscription, WeakEntity,
+    Window,
 };
 use settings::{SettingsContent, update_settings_file};
 use std::{any::TypeId, sync::Arc};
@@ -101,6 +102,7 @@ pub struct StatusBar {
     left_items: Vec<Box<dyn StatusItemViewHandle>>,
     right_items: Vec<Box<dyn StatusItemViewHandle>>,
     active_pane: Entity<Pane>,
+    active_pane_item_id: Option<EntityId>,
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     focus_handle: FocusHandle,
     _observe_active_pane: Subscription,
@@ -330,18 +332,20 @@ impl StatusBar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut this = Self {
+        Self {
             left_items: Default::default(),
             right_items: Default::default(),
             active_pane: active_pane.clone(),
+            active_pane_item_id: active_pane
+                .read(cx)
+                .active_item()
+                .map(|item| item.item_id()),
             multi_workspace,
             focus_handle: cx.focus_handle(),
             _observe_active_pane: cx.observe_in(active_pane, window, |this, _, window, cx| {
                 this.update_active_pane_item(window, cx)
             }),
-        };
-        this.update_active_pane_item(window, cx);
-        this
+        }
     }
 
     pub fn set_multi_workspace(
@@ -448,6 +452,12 @@ impl StatusBar {
 
     fn update_active_pane_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active_pane_item = self.active_pane.read(cx).active_item();
+        let active_pane_item_id = active_pane_item.as_ref().map(|item| item.item_id());
+        if self.active_pane_item_id == active_pane_item_id {
+            return;
+        }
+        self.active_pane_item_id = active_pane_item_id;
+
         for item in self.left_items.iter().chain(&self.right_items) {
             item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
         }
