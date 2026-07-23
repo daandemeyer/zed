@@ -4503,6 +4503,7 @@ impl GitPanel {
     }
 
     fn update_visible_entries(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let previous_changes_count = self.changes_count;
         let path_style = self.project.read(cx).path_style(cx);
         let selected_change = self.selected_entry.and_then(|index| {
             let entry = self.entries.get(index)?.status_entry()?;
@@ -4576,6 +4577,9 @@ impl GitPanel {
 
         let Some(repo) = self.active_repository.as_ref() else {
             // Just clear entries if no repository is active.
+            if self.changes_count != previous_changes_count {
+                cx.emit(PanelEvent::ChromeChanged);
+            }
             cx.notify();
             return;
         };
@@ -4864,6 +4868,9 @@ impl GitPanel {
             editor.set_placeholder_text(&placeholder_text, window, cx)
         });
 
+        if self.changes_count != previous_changes_count {
+            cx.emit(PanelEvent::ChromeChanged);
+        }
         cx.notify();
     }
 
