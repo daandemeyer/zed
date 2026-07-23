@@ -81,6 +81,7 @@ pub struct TerminalPanel {
     workspace: WeakEntity<Workspace>,
     pending_serialization: Task<Option<()>>,
     pending_terminals_to_add: usize,
+    terminal_count: usize,
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
     active: bool,
@@ -98,6 +99,7 @@ impl TerminalPanel {
             workspace: workspace.weak_handle(),
             pending_serialization: Task::ready(None),
             pending_terminals_to_add: 0,
+            terminal_count: 0,
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             active: false,
@@ -333,10 +335,14 @@ impl TerminalPanel {
     ) {
         match event {
             pane::Event::ActivateItem { .. } => self.serialize(cx),
-            pane::Event::RemovedItem { .. } => self.serialize(cx),
+            pane::Event::RemovedItem { .. } => {
+                self.serialize(cx);
+                self.sync_terminal_count(cx);
+            }
             pane::Event::Remove { focus_on_pane } => {
                 let pane_count_before_removal = self.center.panes().len();
                 let _removal_result = self.center.remove(pane, cx);
+                self.sync_terminal_count(cx);
                 if pane_count_before_removal == 1 {
                     self.center.first_pane().update(cx, |pane, cx| {
                         pane.set_zoomed(false, cx);
@@ -373,6 +379,7 @@ impl TerminalPanel {
                     })
                 }
                 self.serialize(cx);
+                self.sync_terminal_count(cx);
             }
             &pane::Event::Split { direction, mode } => {
                 match mode {
@@ -387,6 +394,7 @@ impl TerminalPanel {
                             panel
                                 .update_in(cx, |panel, window, cx| {
                                     panel.center.split(&pane, &new_pane, direction, cx);
+                                    panel.sync_terminal_count(cx);
                                     window.focus(&new_pane.focus_handle(cx), cx);
                                 })
                                 .ok();
@@ -411,6 +419,7 @@ impl TerminalPanel {
                             pane.add_item(item, true, true, None, window, cx);
                         });
                         self.center.split(&pane, &new_pane, direction, cx);
+                        self.sync_terminal_count(cx);
                         window.focus(&new_pane.focus_handle(cx), cx);
                     }
                 };
@@ -423,6 +432,19 @@ impl TerminalPanel {
             }
 
             _ => {}
+        }
+    }
+
+    pub(crate) fn sync_terminal_count(&mut self, cx: &mut Context<Self>) {
+        let terminal_count = self
+            .center
+            .panes()
+            .into_iter()
+            .map(|pane| pane.read(cx).items_len())
+            .sum();
+        if terminal_count != self.terminal_count {
+            self.terminal_count = terminal_count;
+            cx.emit(PanelEvent::ChromeChanged);
         }
     }
 
