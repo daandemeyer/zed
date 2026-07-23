@@ -45,7 +45,7 @@ use remote::{RemoteConnectionOptions, same_remote_connection_identity};
 use ui::utils::platform_title_bar_height;
 
 use serde::{Deserialize, Serialize};
-use settings::Settings as _;
+use settings::{Settings as _, SettingsStore};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::mem;
@@ -834,6 +834,17 @@ impl Sidebar {
         let focus_handle = cx.focus_handle();
         cx.on_focus_in(&focus_handle, window, Self::focus_in)
             .detach();
+
+        let mut previous_side = AgentSettings::get_global(cx).sidebar_side();
+        cx.observe_global::<SettingsStore>(move |_, cx| {
+            let side = AgentSettings::get_global(cx).sidebar_side();
+            if side != previous_side {
+                previous_side = side;
+                cx.emit(workspace::SidebarEvent::LayoutChanged);
+                cx.notify();
+            }
+        })
+        .detach();
 
         AgentThreadWorktreeLabelFlag::watch(cx);
 
@@ -2046,9 +2057,7 @@ impl Sidebar {
         self.prefetch_worktree_default_branches(cx);
 
         if had_notifications != self.has_notifications(cx) {
-            multi_workspace.update(cx, |_, cx| {
-                cx.notify();
-            });
+            cx.emit(workspace::SidebarEvent::NotificationStateChanged);
         }
 
         cx.notify();
@@ -7873,6 +7882,7 @@ impl Sidebar {
         self._subscriptions.push(subscription);
         self.view = SidebarView::Archive(archive_view.clone());
         archive_view.update(cx, |view, cx| view.focus_filter_editor(window, cx));
+        cx.emit(workspace::SidebarEvent::ActiveViewChanged);
         self.serialize(cx);
         cx.notify();
     }
@@ -7882,6 +7892,7 @@ impl Sidebar {
         self._subscriptions.clear();
         let handle = self.filter_editor.read(cx).focus_handle(cx);
         handle.focus(window, cx);
+        cx.emit(workspace::SidebarEvent::ActiveViewChanged);
         self.serialize(cx);
         cx.notify();
     }
@@ -7953,7 +7964,12 @@ impl WorkspaceSidebar for Sidebar {
     }
 
     fn set_width(&mut self, width: Option<Pixels>, cx: &mut Context<Self>) {
-        self.width = width.unwrap_or(DEFAULT_WIDTH).clamp(MIN_WIDTH, MAX_WIDTH);
+        let width = width.unwrap_or(DEFAULT_WIDTH).clamp(MIN_WIDTH, MAX_WIDTH);
+        if self.width == width {
+            return;
+        }
+        self.width = width;
+        cx.emit(workspace::SidebarEvent::LayoutChanged);
         cx.notify();
     }
 
@@ -8010,7 +8026,11 @@ impl WorkspaceSidebar for Sidebar {
     ) {
         if let Some(serialized) = serde_json::from_str::<SerializedSidebar>(state).log_err() {
             if let Some(width) = serialized.width {
-                self.width = px(width).clamp(MIN_WIDTH, MAX_WIDTH);
+                let width = px(width).clamp(MIN_WIDTH, MAX_WIDTH);
+                if self.width != width {
+                    self.width = width;
+                    cx.emit(workspace::SidebarEvent::LayoutChanged);
+                }
             }
             if serialized.active_view == SerializedSidebarView::History {
                 cx.defer_in(window, |this, window, cx| {
