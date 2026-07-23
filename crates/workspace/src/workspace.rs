@@ -12615,6 +12615,85 @@ mod tests {
         assert!(!noise.branch);
     }
 
+    #[derive(Default)]
+    struct CountingStatusItem {
+        active_item_updates: usize,
+    }
+
+    impl Render for CountingStatusItem {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Empty
+        }
+    }
+
+    impl StatusItemView for CountingStatusItem {
+        fn set_active_pane_item(
+            &mut self,
+            _: Option<&dyn ItemHandle>,
+            _: &mut Window,
+            _: &mut Context<Self>,
+        ) {
+            self.active_item_updates += 1;
+        }
+
+        fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+            None
+        }
+    }
+
+    #[gpui::test]
+    async fn test_status_bar_updates_items_for_active_item_metadata_changes(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let status_item = cx.new(|_| CountingStatusItem::default());
+        let status_bar = workspace.read_with(cx, |workspace, _| workspace.status_bar().clone());
+        status_bar.update_in(cx, |status_bar, window, cx| {
+            status_bar.add_left_item(status_item.clone(), window, cx);
+        });
+        assert_eq!(
+            status_item.read_with(cx, |item, _| item.active_item_updates),
+            1
+        );
+
+        let active_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        active_pane.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            status_item.read_with(cx, |item, _| item.active_item_updates),
+            1
+        );
+
+        active_pane.update(cx, |_, cx| cx.emit(pane::Event::ChangeItemTitle));
+        cx.run_until_parked();
+        assert_eq!(
+            status_item.read_with(cx, |item, _| item.active_item_updates),
+            2
+        );
+
+        let item = cx.new(TestItem::new);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            status_item.read_with(cx, |item, _| item.active_item_updates),
+            3
+        );
+
+        active_pane.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            status_item.read_with(cx, |item, _| item.active_item_updates),
+            3
+        );
+    }
+
     #[gpui::test]
     async fn test_tab_disambiguation(cx: &mut TestAppContext) {
         init_test(cx);
