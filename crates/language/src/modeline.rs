@@ -77,10 +77,7 @@ pub fn modeline_line_count(cx: &App) -> usize {
 }
 
 /// Parse modelines from the first and last `modeline_lines` lines of `content`.
-pub fn parse_modeline_from_rope(
-    content: &Rope,
-    modeline_lines: usize,
-) -> Option<ModelineSettings> {
+pub fn parse_modeline_from_rope(content: &Rope, modeline_lines: usize) -> Option<ModelineSettings> {
     const MAX_MODELINE_BYTES: usize = 1024;
 
     let first_bytes = content.clip_offset(content.len().min(MAX_MODELINE_BYTES), Bias::Left);
