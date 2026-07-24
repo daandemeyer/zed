@@ -32,7 +32,7 @@ impl Editor {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        callback: Fn,
+        mut callback: Fn,
     ) where
         Fn: FnMut(&mut Vec<Cow<'_, str>>),
     {
@@ -40,7 +40,7 @@ impl Editor {
             return;
         }
 
-        self.manipulate_mutable_lines(window, cx, callback);
+        self.manipulate_mutable_lines(window, cx, |lines, _start_row| callback(lines));
     }
 
     fn is_in_markdown_language(&self, cx: &mut App) -> bool {

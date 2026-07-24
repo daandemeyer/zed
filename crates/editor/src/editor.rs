@@ -5472,8 +5472,7 @@ impl Editor {
 
             // If the selection is non-empty, then increase the indentation of the selected lines.
             if !selection.is_empty() {
-                row_delta =
-                    Self::indent_selection(&snapshot, selection, &mut edits, row_delta, cx);
+                row_delta = Self::indent_selection(&snapshot, selection, &mut edits, row_delta, cx);
                 continue;
             }
 
@@ -7024,7 +7023,7 @@ impl Editor {
         cx: &mut Context<Self>,
         mut manipulate: M,
     ) where
-        M: FnMut(&str) -> LineManipulationResult,
+        M: FnMut(&str, MultiBufferRow) -> LineManipulationResult,
     {
         if self.read_only(cx) {
             return;
@@ -7063,7 +7062,7 @@ impl Editor {
                 new_text,
                 line_count_before,
                 line_count_after,
-            } = manipulate(&text);
+            } = manipulate(&text, start_row);
 
             edits.push((start_point..end_point, new_text));
 
@@ -7124,7 +7123,7 @@ impl Editor {
     ) where
         Fn: FnMut(&mut Vec<&str>),
     {
-        self.manipulate_lines(window, cx, |text| {
+        self.manipulate_lines(window, cx, |text, _start_row| {
             let mut lines: Vec<&str> = text.split('\n').collect();
             let line_count_before = lines.len();
 
@@ -7144,13 +7143,13 @@ impl Editor {
         cx: &mut Context<Self>,
         mut callback: Fn,
     ) where
-        Fn: FnMut(&mut Vec<Cow<'_, str>>),
+        Fn: FnMut(&mut Vec<Cow<'_, str>>, MultiBufferRow),
     {
-        self.manipulate_lines(window, cx, |text| {
+        self.manipulate_lines(window, cx, |text, start_row| {
             let mut lines: Vec<Cow<str>> = text.split('\n').map(Cow::from).collect();
             let line_count_before = lines.len();
 
-            callback(&mut lines);
+            callback(&mut lines, start_row);
 
             LineManipulationResult {
                 new_text: lines.join("\n"),
@@ -7166,18 +7165,17 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let settings = self.buffer.read(cx).language_settings(cx);
-        let tab_size = settings.indentation().tab_width().get() as usize;
+        let tab_width_for_row = self.tab_width_for_row(cx);
 
-        self.manipulate_mutable_lines(window, cx, |lines| {
+        self.manipulate_mutable_lines(window, cx, |lines, start_row| {
             // Allocates a reasonably sized scratch buffer once for the whole loop
             let mut reindented_line = String::with_capacity(MAX_LINE_LEN);
-            // Avoids recomputing spaces that could be inserted many times
-            let space_cache: Vec<Vec<char>> = (1..=tab_size)
-                .map(|n| IndentSize::spaces(n as u32).chars().collect())
-                .collect();
 
-            for line in lines.iter_mut().filter(|line| !line.is_empty()) {
+            for (offset, line) in lines.iter_mut().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+                let tab_size = tab_width_for_row(MultiBufferRow(start_row.0 + offset as u32));
                 let mut chars = line.as_ref().chars();
                 let mut col = 0;
                 let mut changed = false;
@@ -7191,7 +7189,7 @@ impl Editor {
                         '\t' => {
                             // \t are converted to spaces depending on the current column
                             let spaces_len = tab_size - (col % tab_size);
-                            reindented_line.extend(&space_cache[spaces_len - 1]);
+                            reindented_line.extend(IndentSize::spaces(spaces_len as u32).chars());
                             col += spaces_len;
                             changed = true;
                         }
@@ -7235,18 +7233,17 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let settings = self.buffer.read(cx).language_settings(cx);
-        let tab_size = settings.indentation().tab_width().get() as usize;
+        let tab_width_for_row = self.tab_width_for_row(cx);
 
-        self.manipulate_mutable_lines(window, cx, |lines| {
+        self.manipulate_mutable_lines(window, cx, |lines, start_row| {
             // Allocates a reasonably sized buffer once for the whole loop
             let mut reindented_line = String::with_capacity(MAX_LINE_LEN);
-            // Avoids recomputing spaces that could be inserted many times
-            let space_cache: Vec<Vec<char>> = (1..=tab_size)
-                .map(|n| IndentSize::spaces(n as u32).chars().collect())
-                .collect();
 
-            for line in lines.iter_mut().filter(|line| !line.is_empty()) {
+            for (offset, line) in lines.iter_mut().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+                let tab_size = tab_width_for_row(MultiBufferRow(start_row.0 + offset as u32));
                 let mut chars = line.chars();
                 let mut spaces_count = 0;
                 let mut first_non_indent_char = None;
@@ -7281,7 +7278,7 @@ impl Editor {
                 }
                 // Remaining spaces that didn't make a full tab stop
                 if spaces_count > 0 {
-                    reindented_line.extend(&space_cache[spaces_count - 1]);
+                    reindented_line.extend(IndentSize::spaces(spaces_count as u32).chars());
                 }
                 // If we consume an extra character that was not indentation, add it back
                 if let Some(extra_char) = first_non_indent_char {
