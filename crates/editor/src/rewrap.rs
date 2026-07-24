@@ -22,7 +22,6 @@ impl Editor {
 
         // Split selections to respect paragraph, indent, and comment prefix boundaries.
         let wrap_ranges = selections.into_iter().flat_map(|selection| {
-            let language_settings = buffer.language_settings_at(selection.head(), cx);
             let language_scope = buffer.language_scope_at(selection.head());
 
             let indent_and_prefix_for_row =
@@ -189,7 +188,7 @@ impl Editor {
 
                 if has_paragraph_break || has_boundary_change {
                     ranges.push((
-                        language_settings.clone(),
+                        buffer.language_settings_at(Point::new(current_range_start, 0), cx),
                         Point::new(current_range_start, 0)
                             ..Point::new(prev_row, buffer.line_len(MultiBufferRow(prev_row))),
                         current_range_indent,
@@ -205,7 +204,7 @@ impl Editor {
             }
 
             ranges.push((
-                language_settings.clone(),
+                buffer.language_settings_at(Point::new(current_range_start, 0), cx),
                 Point::new(current_range_start, 0)
                     ..Point::new(prev_row, buffer.line_len(MultiBufferRow(prev_row))),
                 current_range_indent,
