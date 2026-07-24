@@ -6592,7 +6592,7 @@ impl Editor {
             return;
         }
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let tab_size = display_snapshot.tab_snapshot().tab_size.get();
+        let tab_width_for_row = self.tab_width_for_row(cx);
 
         struct CursorData {
             anchor: Anchor,
@@ -6610,6 +6610,7 @@ impl Editor {
                     selection.tail()
                 };
                 let point = anchor.to_point(buffer_snapshot);
+                let tab_size = tab_width_for_row(MultiBufferRow(point.row)) as u32;
                 let mut prefix = String::new();
                 let mut column = 0;
                 for chunk in buffer_snapshot.text_for_range(Point::new(point.row, 0)..point) {
@@ -7211,6 +7212,20 @@ impl Editor {
                 reindented_line.clear();
             }
         });
+    }
+
+    fn tab_width_for_row(&self, cx: &App) -> impl Fn(MultiBufferRow) -> usize + use<> {
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let (default_indentation, indentation_by_buffer) =
+            self.buffer.read(cx).indentation_settings(cx);
+        move |row| {
+            snapshot
+                .buffer_line_for_row(row)
+                .and_then(|(buffer, _)| indentation_by_buffer.get(&buffer.remote_id()).copied())
+                .unwrap_or(default_indentation)
+                .tab_width()
+                .get() as usize
+        }
     }
 
     pub fn convert_indentation_to_tabs(
