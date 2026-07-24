@@ -6334,6 +6334,38 @@ fn test_indent_outdent_with_excerpts(cx: &mut TestAppContext) {
             cx,
         );
 
+        // A single selection spanning both excerpts should indent each row
+        // according to its own buffer's settings.
+        select_ranges(
+            &mut editor,
+            indoc! {"
+                «a = 1
+                b = 2
+
+                const c:ˇ» usize = 3;
+            "},
+            window,
+            cx,
+        );
+
+        editor.tab(&Tab, window, cx);
+        assert_text_with_selections(
+            &mut editor,
+            "  «a = 1\n  b = 2\n  \n    const c:ˇ» usize = 3;\n",
+            cx,
+        );
+        editor.backtab(&Backtab, window, cx);
+        assert_text_with_selections(
+            &mut editor,
+            indoc! {"
+                «a = 1
+                b = 2
+
+                const c:ˇ» usize = 3;
+            "},
+            cx,
+        );
+
         editor
     });
 }
