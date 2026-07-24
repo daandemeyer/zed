@@ -1271,6 +1271,7 @@ impl ToolCall {
         status: Option<ToolCallStatus>,
         language_registry: Arc<LanguageRegistry>,
         terminals: &HashMap<acp_v2::TerminalId, Entity<Terminal>>,
+        project: Option<&Entity<Project>>,
         cx: &mut App,
     ) -> Result<Self> {
         let update = acp_v1::ToolCallUpdate::from(tool_call);
@@ -1279,6 +1280,7 @@ impl ToolCall {
             ToolCallPatch::legacy(update.fields, update.meta),
             language_registry,
             ToolTerminalResolver::registered(terminals),
+            project,
             cx,
         )?;
         if let Some(status) = status {
@@ -1292,6 +1294,7 @@ impl ToolCall {
         patch: ToolCallPatch,
         language_registry: Arc<LanguageRegistry>,
         terminals: ToolTerminalResolver<'_>,
+        project: Option<&Entity<Project>>,
         cx: &mut App,
     ) -> Result<Self> {
         let content = patch
@@ -1301,7 +1304,7 @@ impl ToolCall {
             .transpose()?
             .unwrap_or_default()
             .into_iter()
-            .map(|item| ToolCallContent::from_prepared(item, &language_registry, cx))
+            .map(|item| ToolCallContent::from_prepared(item, &language_registry, project, cx))
             .collect();
         let title = patch.title.take().map(SharedString::from);
         let name = patch.name.take().map(SharedString::from);
@@ -1446,6 +1449,7 @@ impl ToolCall {
         patch: ToolCallPatch,
         language_registry: Arc<LanguageRegistry>,
         terminals: ToolTerminalResolver<'_>,
+        project: Option<&Entity<Project>>,
         cx: &mut App,
     ) -> Result<()> {
         let legacy_terminal_labels = matches!(&patch.meta, ToolMetadataPatch::Legacy(_));
@@ -1568,12 +1572,13 @@ impl ToolCall {
             let mut content = content.into_iter();
 
             for (old, new) in self.structured_content.iter_mut().zip(content.by_ref()) {
-                old.update_from_prepared(new, &language_registry, cx);
+                old.update_from_prepared(new, &language_registry, project, cx);
             }
             for new in content {
                 self.structured_content.push(ToolCallContent::from_prepared(
                     new,
                     &language_registry,
+                    project,
                     cx,
                 ));
             }
@@ -1620,11 +1625,13 @@ impl ToolCall {
         &mut self,
         content: PreparedToolCallContent,
         language_registry: &Arc<LanguageRegistry>,
+        project: Option<&Entity<Project>>,
         cx: &mut App,
     ) {
         self.structured_content.push(ToolCallContent::from_prepared(
             content,
             language_registry,
+            project,
             cx,
         ));
         self.update_raw_output_content(language_registry, cx);
@@ -3041,6 +3048,7 @@ impl ToolCallContent {
     fn from_prepared(
         content: PreparedToolCallContent,
         language_registry: &Arc<LanguageRegistry>,
+        project: Option<&Entity<Project>>,
         cx: &mut App,
     ) -> Self {
         match content {
@@ -3050,8 +3058,10 @@ impl ToolCallContent {
             },
             PreparedToolCallContent::LegacyDiff(source) => {
                 let diff = cx.new(|cx| {
+                    let file = project.and_then(|project| file_for_path(project, &source.path, cx));
                     Diff::finalized(
                         source.path.to_string_lossy().into_owned(),
+                        file,
                         source.old_text.clone(),
                         source.new_text.clone(),
                         language_registry.clone(),
@@ -3082,6 +3092,7 @@ impl ToolCallContent {
         &mut self,
         new: PreparedToolCallContent,
         language_registry: &Arc<LanguageRegistry>,
+        project: Option<&Entity<Project>>,
         cx: &mut App,
     ) {
         match (&mut *self, new) {
@@ -3127,7 +3138,7 @@ impl ToolCallContent {
             (Self::Other { source, .. }, PreparedToolCallContent::Other(new_source)) => {
                 *source = new_source;
             }
-            (_, new) => *self = Self::from_prepared(new, language_registry, cx),
+            (_, new) => *self = Self::from_prepared(new, language_registry, project, cx),
         }
     }
 
@@ -5338,6 +5349,7 @@ impl AcpThread {
                     patch,
                     languages,
                     ToolTerminalResolver::registered(&self.terminals),
+                    Some(&self.project),
                     cx,
                 );
                 let detached_id =
@@ -5387,6 +5399,7 @@ impl AcpThread {
             Some(ToolCallStatus::Failed),
             languages,
             &self.terminals,
+            Some(&self.project),
             cx,
         )?;
         self.push_entry(AgentThreadEntry::ToolCall(failed_tool_call), cx);
@@ -5485,6 +5498,7 @@ impl AcpThread {
                 patch,
                 language_registry,
                 ToolTerminalResolver::registered(&self.terminals),
+                Some(&self.project),
                 cx,
             );
             let detached_id = authorization_id.filter(|id| call.authorization_id() != Some(*id));
@@ -5512,6 +5526,7 @@ impl AcpThread {
                 patch,
                 language_registry,
                 ToolTerminalResolver::registered(&self.terminals),
+                Some(&self.project),
                 cx,
             )?;
             if let Some(status) = status {
@@ -5573,7 +5588,7 @@ impl AcpThread {
                 unreachable!()
             };
             let authorization_id = call.authorization_id();
-            let result = call.apply_patch(patch, languages, terminals, cx);
+            let result = call.apply_patch(patch, languages, terminals, Some(&self.project), cx);
             let detached_id = authorization_id.filter(|id| call.authorization_id() != Some(*id));
             if let Some(id) = detached_id {
                 self.resolve_permission_request(id, RequestPermissionOutcome::Cancelled, cx);
@@ -5581,7 +5596,14 @@ impl AcpThread {
             cx.emit(AcpThreadEvent::EntryUpdated(index));
             result?;
         } else {
-            let call = ToolCall::from_patch(id.clone(), patch, languages, terminals, cx)?;
+            let call = ToolCall::from_patch(
+                id.clone(),
+                patch,
+                languages,
+                terminals,
+                Some(&self.project),
+                cx,
+            )?;
             self.push_entry(AgentThreadEntry::ToolCall(call), cx);
         }
         if locations_changed {
@@ -5609,10 +5631,11 @@ impl AcpThread {
             cx,
         )?;
         let language_registry = self.project.read(cx).languages().clone();
+        let project = self.project.clone();
         let id = tool_call_id;
 
         if let Some((index, call)) = self.tool_call_mut(&id) {
-            call.append_content(content, &language_registry, cx);
+            call.append_content(content, &language_registry, Some(&project), cx);
             cx.emit(AcpThreadEvent::EntryUpdated(index));
         } else {
             let mut call = ToolCall::from_patch(
@@ -5620,9 +5643,10 @@ impl AcpThread {
                 ToolCallPatch::protocol(acp_v2::ToolCallUpdate::new(id)),
                 language_registry.clone(),
                 ToolTerminalResolver::registered(&self.terminals),
+                Some(&project),
                 cx,
             )?;
-            call.append_content(content, &language_registry, cx);
+            call.append_content(content, &language_registry, Some(&project), cx);
             self.push_entry(AgentThreadEntry::ToolCall(call), cx);
         }
         Ok(())
@@ -9110,6 +9134,7 @@ mod tests {
             let mut content = ToolCallContent::from_prepared(
                 prepared.into_iter().next().expect("content"),
                 &languages,
+                None,
                 cx,
             );
             let original = content.markdown().expect("markdown").clone();
@@ -9122,6 +9147,7 @@ mod tests {
             content.update_from_prepared(
                 prepared.into_iter().next().expect("update"),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::ContentBlock { block, meta } = &content else {
@@ -9164,6 +9190,7 @@ mod tests {
                     "text/markdown",
                 ))),
                 &languages,
+                None,
                 cx,
             );
             let markdown = content.markdown().expect("preview").clone();
@@ -9172,6 +9199,7 @@ mod tests {
                 content.update_from_prepared(
                     PreparedToolCallContent::ContentBlock(acp_v2::Content::new(source.clone())),
                     &languages,
+                    None,
                     cx,
                 );
                 assert_eq!(content.markdown(), Some(&markdown));
@@ -9203,6 +9231,7 @@ mod tests {
             content.update_from_prepared(
                 PreparedToolCallContent::ContentBlock(acp_v2::Content::new(blob("tool://old.png"))),
                 &languages,
+                None,
                 cx,
             );
             assert!(content.markdown().is_none());
@@ -9211,6 +9240,7 @@ mod tests {
             content.update_from_prepared(
                 PreparedToolCallContent::ContentBlock(acp_v2::Content::new(source.clone())),
                 &languages,
+                None,
                 cx,
             );
             assert!(Arc::ptr_eq(content.image().expect("image").0, &decoded));
@@ -9234,6 +9264,7 @@ mod tests {
                     acp_v2::ContentBlock::Image(image.clone()),
                 )),
                 &languages,
+                None,
                 cx,
             );
             let original = content.image().expect("image").0.clone();
@@ -9244,6 +9275,7 @@ mod tests {
                     ),
                 )),
                 &languages,
+                None,
                 cx,
             );
             assert!(Arc::ptr_eq(&original, content.image().expect("image").0));
@@ -9270,6 +9302,7 @@ mod tests {
             let mut content = ToolCallContent::from_prepared(
                 PreparedToolCallContent::LegacyDiff(acp_v1::Diff::new("first.rs", "new")),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::LegacyDiff { diff, .. } = &content else {
@@ -9282,6 +9315,7 @@ mod tests {
                         .meta(acp_v1::Meta::from_iter([("revision".into(), 1.into())])),
                 ),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::LegacyDiff { source, diff } = &content else {
@@ -9297,6 +9331,7 @@ mod tests {
                     acp_v1::Diff::new("first.rs", "new").old_text(""),
                 ),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::LegacyDiff { source, diff } = &content else {
@@ -9310,6 +9345,7 @@ mod tests {
                     acp_v1::Diff::new("second.rs", "new").old_text(""),
                 ),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::LegacyDiff { source, diff } = &content else {
@@ -9320,6 +9356,7 @@ mod tests {
             let native_diff = cx.new(|cx| {
                 Diff::finalized(
                     "native.rs".into(),
+                    None,
                     Some("before".into()),
                     "after".into(),
                     languages.clone(),
@@ -9330,6 +9367,7 @@ mod tests {
             native.update_from_prepared(
                 PreparedToolCallContent::LegacyDiff(acp_v1::Diff::new("native.rs", "replacement")),
                 &languages,
+                None,
                 cx,
             );
             assert!(matches!(native, ToolCallContent::LegacyDiff { .. }));
@@ -9363,6 +9401,7 @@ mod tests {
             let mut content = ToolCallContent::from_prepared(
                 PreparedToolCallContent::DiffPatch(source.clone()),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::DiffPatch { render, .. } = &content else {
@@ -9376,6 +9415,7 @@ mod tests {
             content.update_from_prepared(
                 PreparedToolCallContent::DiffPatch(source.clone()),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::DiffPatch {
@@ -9396,6 +9436,7 @@ mod tests {
             content.update_from_prepared(
                 PreparedToolCallContent::DiffPatch(source.clone()),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::DiffPatch {
@@ -9429,7 +9470,7 @@ mod tests {
             .expect("prepare v2 content");
             let mut content: Vec<_> = prepared
                 .into_iter()
-                .map(|content| ToolCallContent::from_prepared(content, &languages, cx))
+                .map(|content| ToolCallContent::from_prepared(content, &languages, None, cx))
                 .collect();
             let ToolCallContent::DiffPatch { source, render } = &content[0] else {
                 panic!("patch")
@@ -9447,6 +9488,7 @@ mod tests {
                         .meta(acp_v2::Meta::from_iter([("revision".into(), 2.into())])),
                 ),
                 &languages,
+                None,
                 cx,
             );
             let ToolCallContent::DiffPatch { source, render } = &content[0] else {
@@ -14725,6 +14767,7 @@ mod tests {
                 ToolCallPatch::legacy(acp_v1::ToolCallUpdateFields::new(), None),
                 languages,
                 ToolTerminalResolver::registered(&thread.terminals),
+                None,
                 cx,
             )
             .expect("missing enums use display fallbacks");
@@ -15715,6 +15758,7 @@ mod tests {
                     Some(ToolCallStatus::Pending),
                     languages.clone(),
                     &HashMap::default(),
+                    None,
                     cx,
                 )
                 .expect("tool call should convert")
@@ -15755,6 +15799,7 @@ mod tests {
                 Some(ToolCallStatus::Pending),
                 languages.clone(),
                 &HashMap::default(),
+                None,
                 cx,
             )
             .expect("tool call should convert")
@@ -15813,6 +15858,7 @@ mod tests {
                     ToolCallPatch::legacy(update, None),
                     languages.clone(),
                     ToolTerminalResolver::registered(&HashMap::default()),
+                    None,
                     cx,
                 )
                 .expect("tool label update should apply");
@@ -15844,6 +15890,7 @@ mod tests {
                 Some(ToolCallStatus::Pending),
                 languages.clone(),
                 &HashMap::default(),
+                None,
                 cx,
             )
             .expect("raw-only tool call should convert")
@@ -15854,6 +15901,7 @@ mod tests {
                 Some(ToolCallStatus::Pending),
                 languages.clone(),
                 &HashMap::default(),
+                None,
                 cx,
             )
             .expect("empty tool call should convert")
@@ -15869,6 +15917,7 @@ mod tests {
                     ),
                     languages.clone(),
                     ToolTerminalResolver::registered(&HashMap::default()),
+                    None,
                     cx,
                 )
                 .expect("first raw output update should apply");
@@ -15892,6 +15941,7 @@ mod tests {
                     ),
                     languages.clone(),
                     ToolTerminalResolver::registered(&HashMap::default()),
+                    None,
                     cx,
                 )
                 .expect("second raw output update should apply");
@@ -15903,6 +15953,7 @@ mod tests {
                     ),
                     languages.clone(),
                     ToolTerminalResolver::registered(&HashMap::default()),
+                    None,
                     cx,
                 )
                 .expect("second raw output update should apply");
@@ -15942,6 +15993,7 @@ mod tests {
                 Some(ToolCallStatus::Pending),
                 languages.clone(),
                 &HashMap::default(),
+                None,
                 cx,
             )
             .expect("tool call should convert")
@@ -15960,6 +16012,7 @@ mod tests {
                 ),
                 languages.clone(),
                 ToolTerminalResolver::registered(&HashMap::default()),
+                None,
                 cx,
             )
             .expect("raw output should update without replacing structured content");
@@ -15973,6 +16026,7 @@ mod tests {
                 ToolCallPatch::legacy(acp_v1::ToolCallUpdateFields::new().content(vec![]), None),
                 languages.clone(),
                 ToolTerminalResolver::registered(&HashMap::default()),
+                None,
                 cx,
             )
             .expect("clearing structured content should apply");
@@ -15992,6 +16046,7 @@ mod tests {
                 ),
                 languages,
                 ToolTerminalResolver::registered(&HashMap::default()),
+                None,
                 cx,
             )
             .expect("structured content should replace the raw fallback");
@@ -16245,6 +16300,7 @@ mod tests {
                 Some(ToolCallStatus::InProgress),
                 languages.clone(),
                 &terminals,
+                None,
                 cx,
             )
             .expect("tool");
@@ -16268,6 +16324,7 @@ mod tests {
                     ),
                     languages.clone(),
                     ToolTerminalResolver::registered(&terminals),
+                    None,
                     cx,
                 )
                 .expect("update snapshots");
@@ -16291,6 +16348,7 @@ mod tests {
                 ),
                 languages.clone(),
                 ToolTerminalResolver::registered(&terminals),
+                None,
                 cx,
             )
             .expect("same diff text at another path");
@@ -16308,6 +16366,7 @@ mod tests {
                 ),
                 languages.clone(),
                 ToolTerminalResolver::registered(&terminals),
+                None,
                 cx,
             )
             .expect("clear structured content and render a typed null input");
@@ -16326,6 +16385,7 @@ mod tests {
                     ),
                     languages,
                     ToolTerminalResolver::registered(&terminals),
+                    None,
                     cx,
                 )
                 .is_err()
