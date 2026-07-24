@@ -278,10 +278,6 @@ impl WrapMap {
         true
     }
 
-    fn indent_adjustment(&self, tab_size: NonZeroU32) -> IndentAdjustment {
-        indent_adjustment_for(self.soft_wrap_indent, tab_size)
-    }
-
     #[ztracing::instrument(skip_all)]
     fn rewrap(&mut self, cx: &mut Context<Self>) {
         self.background_task.take();
@@ -309,21 +305,21 @@ impl WrapMap {
                     tab_snapshot.clone(),
                     &tab_edits,
                     wrap_width,
-                    self.indent_adjustment(tab_snapshot.tab_size),
+                    self.soft_wrap_indent,
                     &mut line_wrapper,
                     &mut fragment_builder,
                 ));
                 self.snapshot = new_snapshot;
                 self.edits_since_sync = self.edits_since_sync.compose(&edits);
             } else {
-                let indent_adjustment = self.indent_adjustment(tab_snapshot.tab_size);
+                let soft_wrap_indent = self.soft_wrap_indent;
                 let task = cx.background_spawn(async move {
                     let edits = new_snapshot
                         .update(
                             tab_snapshot,
                             &tab_edits,
                             wrap_width,
-                            indent_adjustment,
+                            soft_wrap_indent,
                             &mut line_wrapper,
                             &mut fragment_builder,
                         )
@@ -413,12 +409,11 @@ impl WrapMap {
             if update_passes + total_new_rows < WRAP_YIELD_ROW_INTERVAL {
                 let mut wrap_edits = Patch::default();
                 for (tab_snapshot, tab_edits) in pending_edits {
-                    let indent_adjustment = self.indent_adjustment(tab_snapshot.tab_size);
                     let edits = gpui::block_on(snapshot.update(
                         tab_snapshot,
                         &tab_edits,
                         wrap_width,
-                        indent_adjustment,
+                        self.soft_wrap_indent,
                         &mut line_wrapper,
                         &mut fragment_builder,
                     ));
@@ -431,14 +426,12 @@ impl WrapMap {
                 let update_task = cx.background_spawn(async move {
                     let mut edits = Patch::default();
                     for (tab_snapshot, tab_edits) in pending_edits {
-                        let indent_adjustment =
-                            indent_adjustment_for(soft_wrap_indent, tab_snapshot.tab_size);
                         let wrap_edits = snapshot
                             .update(
                                 tab_snapshot,
                                 &tab_edits,
                                 wrap_width,
-                                indent_adjustment,
+                                soft_wrap_indent,
                                 &mut line_wrapper,
                                 &mut fragment_builder,
                             )
@@ -586,7 +579,7 @@ impl WrapSnapshot {
         new_tab_snapshot: TabSnapshot,
         tab_edits: &[TabEdit],
         wrap_width: Pixels,
-        indent_adjustment: IndentAdjustment,
+        soft_wrap_indent: SoftWrapIndent,
         line_wrapper: &mut LineWrapper,
         fragment_builder: &mut LineFragmentBuilder,
     ) -> WrapPatch {
@@ -652,7 +645,7 @@ impl WrapSnapshot {
                     Highlights::default(),
                 );
                 let mut edit_transforms = Vec::<Transform>::new();
-                for (i, _) in (edit.new_rows.start..edit.new_rows.end).enumerate() {
+                for (i, row) in (edit.new_rows.start..edit.new_rows.end).enumerate() {
                     while let Some(chunk) = remaining.take().or_else(|| chunks.next()) {
                         if let Some(ix) = chunk.text.find('\n') {
                             let (prefix, suffix) = chunk.text.split_at(ix + 1);
@@ -680,6 +673,14 @@ impl WrapSnapshot {
                         break;
                     }
 
+                    // Extra soft wrap indentation is measured in indentation levels of the buffer
+                    // that owns the row, which differ between excerpts of a multibuffer.
+                    let indent_adjustment = indent_adjustment_for(
+                        soft_wrap_indent,
+                        new_tab_snapshot
+                            .indentation_settings_for_row(row)
+                            .indent_size(),
+                    );
                     let mut prev_boundary_ix = 0;
                     for boundary in
                         line_wrapper.wrap_line(&line_fragments, wrap_width, indent_adjustment)
