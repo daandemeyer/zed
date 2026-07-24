@@ -248,9 +248,11 @@ impl EditSessionContext {
                 new_text,
                 ..
             } => {
-                event_stream.update_diff(cx.new(|_| {
+                event_stream.update_diff(cx.new(|cx| {
+                    let file = acp_thread::file_for_path(&self.project, &input_path, cx);
                     Diff::finalized(
                         input_path.to_string_lossy().into_owned(),
+                        file,
                         Some(old_text.to_string()),
                         new_text,
                         self.language_registry.clone(),
