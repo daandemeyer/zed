@@ -8,7 +8,7 @@ use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Subscriptio
 use itertools::Itertools;
 use language::{
     Anchor, Buffer, Capability, DiskState, File, LanguageRegistry, OffsetRangeExt as _, Point,
-    TextBuffer,
+    TextBuffer, modeline,
 };
 use markdown::Markdown;
 use multi_buffer::{MultiBuffer, PathKey, excerpt_context_lines};
@@ -297,7 +297,13 @@ impl Diff {
                 cx.entity_id().as_non_zero_u64().into(),
                 new_text,
             );
-            Buffer::build(text_buffer, file, Capability::ReadWrite, cx)
+            let mut buffer = Buffer::build(text_buffer, file, Capability::ReadWrite, cx);
+            let modeline = modeline::parse_modeline_from_rope(
+                buffer.as_rope(),
+                modeline::modeline_line_count(cx),
+            );
+            buffer.set_modeline(modeline, cx);
+            buffer
         });
         let base_text_exists = old_text.is_some();
         let base_text = old_text.clone().unwrap_or(String::new()).into();
@@ -546,6 +552,11 @@ impl PendingDiff {
         let buffer = cx.new(|cx| {
             let language = self.new_buffer.read(cx).language().cloned();
             let file = self.new_buffer.read(cx).file().cloned();
+            let modeline = self
+                .new_buffer
+                .read(cx)
+                .modeline()
+                .map(|modeline| (**modeline).clone());
             let buffer = TextBuffer::new_normalized(
                 replica_id,
                 cx.entity_id().as_non_zero_u64().into(),
@@ -554,6 +565,7 @@ impl PendingDiff {
             );
             let mut buffer = Buffer::build(buffer, file, Capability::ReadWrite, cx);
             buffer.set_language(language, cx);
+            buffer.set_modeline(modeline, cx);
             buffer
         });
 
@@ -716,6 +728,7 @@ mod tests {
     use project::FakeFs;
     use serde_json::json;
     use settings::SettingsStore;
+    use std::num::NonZeroU32;
     use util::path;
 
     use crate::Diff;
@@ -1060,6 +1073,69 @@ mod tests {
             let file = buffer.file().expect("diff buffer should have a file");
             assert_eq!(file.path().as_unix_str(), "new.txt");
             assert_eq!(file.disk_state(), DiskState::New);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_finalized_diff_parses_modeline(cx: &mut TestAppContext) {
+        init_test(cx);
+        let language_registry = Arc::new(LanguageRegistry::test(cx.executor()));
+        let diff = cx.new(|cx| {
+            Diff::finalized(
+                "a.c".to_string(),
+                None,
+                Some("one\n".to_string()),
+                "/* vim: set ts=3 noet: */\none\ntwo\n".to_string(),
+                language_registry,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let buffers = diff.multibuffer().read(cx).all_buffers();
+            assert_eq!(buffers.len(), 1);
+            for buffer in buffers {
+                let modeline = buffer
+                    .read(cx)
+                    .modeline()
+                    .expect("diff buffer should have a modeline");
+                assert_eq!(modeline.tab_size, NonZeroU32::new(3));
+                assert_eq!(modeline.hard_tabs, Some(true));
+            }
+        });
+    }
+
+    #[gpui::test]
+    async fn test_finalize_preserves_modeline(cx: &mut TestAppContext) {
+        init_test(cx);
+        let buffer = cx.new(|cx| Buffer::local("one\ntwo\n", cx));
+        buffer.update(cx, |buffer, cx| {
+            buffer.set_modeline(
+                Some(language::ModelineSettings {
+                    tab_size: NonZeroU32::new(3),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        let diff = cx.new(|cx| Diff::new(buffer.clone(), cx));
+        buffer.update(cx, |buffer, cx| buffer.set_text("one\nTWO\n", cx));
+        cx.run_until_parked();
+
+        diff.update(cx, |diff, cx| diff.finalize(cx));
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let buffers = diff.multibuffer().read(cx).all_buffers();
+            assert_eq!(buffers.len(), 1);
+            for buffer in buffers {
+                let modeline = buffer
+                    .read(cx)
+                    .modeline()
+                    .expect("finalized diff buffer should keep its modeline");
+                assert_eq!(modeline.tab_size, NonZeroU32::new(3));
+            }
         });
     }
 
