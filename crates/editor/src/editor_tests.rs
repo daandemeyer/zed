@@ -7516,6 +7516,93 @@ async fn test_convert_indentation_to_spaces(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn test_convert_indentation_with_excerpts(cx: &mut TestAppContext) {
+    init_test(cx, |settings| {
+        settings.languages.0.extend([
+            (
+                "TOML".into(),
+                LanguageSettingsContent {
+                    tab_size: NonZeroU32::new(2),
+                    ..Default::default()
+                },
+            ),
+            (
+                "Rust".into(),
+                LanguageSettingsContent {
+                    tab_size: NonZeroU32::new(4),
+                    ..Default::default()
+                },
+            ),
+        ]);
+    });
+
+    let toml_language = Arc::new(Language::new(
+        LanguageConfig {
+            name: "TOML".into(),
+            ..Default::default()
+        },
+        None,
+    ));
+    let rust_language = Arc::new(Language::new(
+        LanguageConfig {
+            name: "Rust".into(),
+            ..Default::default()
+        },
+        None,
+    ));
+
+    let toml_buffer =
+        cx.new(|cx| Buffer::local("\ta = 1\n", cx).with_language(toml_language, cx));
+    let rust_buffer = cx.new(|cx| {
+        Buffer::local("\tconst c: usize = 3;\n", cx).with_language(rust_language, cx)
+    });
+    let multibuffer = cx.new(|cx| {
+        let mut multibuffer = MultiBuffer::new(ReadWrite);
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(0),
+            toml_buffer.clone(),
+            [Point::new(0, 0)..Point::new(1, 0)],
+            0,
+            cx,
+        );
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(1),
+            rust_buffer.clone(),
+            [Point::new(0, 0)..Point::new(1, 0)],
+            0,
+            cx,
+        );
+        multibuffer
+    });
+
+    cx.add_window(|window, cx| {
+        let mut editor = build_editor(multibuffer, window, cx);
+
+        // Each leading tab expands using its own buffer's tab width, not a
+        // single width resolved for the whole editor.
+        select_ranges(
+            &mut editor,
+            "«\ta = 1ˇ»\n\n«\tconst c: usize = 3;ˇ»\n",
+            window,
+            cx,
+        );
+        editor.convert_indentation_to_spaces(&ConvertIndentationToSpaces, window, cx);
+        assert_eq!(editor.text(cx), "  a = 1\n\n    const c: usize = 3;\n");
+
+        select_ranges(
+            &mut editor,
+            "«  a = 1ˇ»\n\n«    const c: usize = 3;ˇ»\n",
+            window,
+            cx,
+        );
+        editor.convert_indentation_to_tabs(&ConvertIndentationToTabs, window, cx);
+        assert_eq!(editor.text(cx), "\ta = 1\n\n\tconst c: usize = 3;\n");
+
+        editor
+    });
+}
+
+#[gpui::test]
 async fn test_convert_indentation_to_tabs(cx: &mut TestAppContext) {
     init_test(cx, |settings| {
         settings.defaults.tab_size = NonZeroU32::new(3)
@@ -9462,6 +9549,85 @@ async fn test_rewrap_block_comments(cx: &mut TestAppContext) {
         cx.update_editor(|e, _, cx| e.rewrap(RewrapOptions::default(), cx));
         cx.assert_editor_state(wrapped_text);
     }
+}
+
+#[gpui::test]
+fn test_rewrap_with_excerpts(cx: &mut TestAppContext) {
+    init_test(cx, |settings| {
+        settings.languages.0.extend([
+            (
+                "TOML".into(),
+                LanguageSettingsContent {
+                    allow_rewrap: Some(language_settings::RewrapBehavior::Anywhere),
+                    preferred_line_length: Some(40),
+                    tab_size: NonZeroU32::new(2),
+                    ..Default::default()
+                },
+            ),
+            (
+                "Rust".into(),
+                LanguageSettingsContent {
+                    allow_rewrap: Some(language_settings::RewrapBehavior::Anywhere),
+                    preferred_line_length: Some(40),
+                    tab_size: NonZeroU32::new(8),
+                    ..Default::default()
+                },
+            ),
+        ]);
+    });
+
+    let toml_language = Arc::new(Language::new(
+        LanguageConfig {
+            name: "TOML".into(),
+            ..Default::default()
+        },
+        None,
+    ));
+    let rust_language = Arc::new(Language::new(
+        LanguageConfig {
+            name: "Rust".into(),
+            ..Default::default()
+        },
+        None,
+    ));
+
+    let text = "\taaaaa bbbbb ccccc ddddd eeeee fffff ggggg\n";
+    let toml_buffer = cx.new(|cx| Buffer::local(text, cx).with_language(toml_language, cx));
+    let rust_buffer = cx.new(|cx| Buffer::local(text, cx).with_language(rust_language, cx));
+    let multibuffer = cx.new(|cx| {
+        let mut multibuffer = MultiBuffer::new(ReadWrite);
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(0),
+            toml_buffer.clone(),
+            [Point::new(0, 0)..Point::new(1, 0)],
+            0,
+            cx,
+        );
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(1),
+            rust_buffer.clone(),
+            [Point::new(0, 0)..Point::new(1, 0)],
+            0,
+            cx,
+        );
+        multibuffer
+    });
+
+    cx.add_window(|window, cx| {
+        let mut editor = build_editor(multibuffer, window, cx);
+
+        // The leading tab consumes 2 columns in the TOML excerpt and 8 in the
+        // Rust excerpt, so each paragraph wraps at a different word even though
+        // both have the same content and preferred line length.
+        editor.select_all(&SelectAll, window, cx);
+        editor.rewrap(RewrapOptions::default(), cx);
+        assert_eq!(
+            editor.text(cx),
+            "\taaaaa bbbbb ccccc ddddd eeeee fffff\n\tggggg\n\n\taaaaa bbbbb ccccc ddddd eeeee\n\tfffff ggggg\n"
+        );
+
+        editor
+    });
 }
 
 #[gpui::test]
