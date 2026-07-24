@@ -5156,49 +5156,9 @@ impl LspStore {
     }
 
     fn parse_modeline(&mut self, buffer_handle: &Entity<Buffer>, cx: &mut Context<Self>) -> bool {
-        let buffer = buffer_handle.read(cx);
-        let content = buffer.as_rope();
-
-        let modeline_settings = {
-            let settings_store = cx.global::<SettingsStore>();
-            let modeline_lines = settings_store
-                .raw_user_settings()
-                .and_then(|s| s.content.modeline_lines)
-                .or(settings_store.raw_default_settings().modeline_lines)
-                .unwrap_or(5);
-
-            const MAX_MODELINE_BYTES: usize = 1024;
-
-            let first_bytes =
-                content.clip_offset(content.len().min(MAX_MODELINE_BYTES), Bias::Left);
-            let mut first_lines = Vec::new();
-            let mut lines = content.chunks_in_range(0..first_bytes).lines();
-            for _ in 0..modeline_lines {
-                if let Some(line) = lines.next() {
-                    first_lines.push(line.to_string());
-                } else {
-                    break;
-                }
-            }
-            let first_lines_ref: Vec<_> = first_lines.iter().map(|line| line.as_str()).collect();
-
-            let last_start =
-                content.clip_offset(content.len().saturating_sub(MAX_MODELINE_BYTES), Bias::Left);
-            let mut last_lines = Vec::new();
-            let mut lines = content
-                .reversed_chunks_in_range(last_start..content.len())
-                .lines();
-            for _ in 0..modeline_lines {
-                if let Some(line) = lines.next() {
-                    last_lines.push(line.to_string());
-                } else {
-                    break;
-                }
-            }
-            let last_lines_ref: Vec<_> =
-                last_lines.iter().rev().map(|line| line.as_str()).collect();
-            modeline::parse_modeline(&first_lines_ref, &last_lines_ref)
-        };
+        let modeline_lines = modeline::modeline_line_count(cx);
+        let modeline_settings =
+            modeline::parse_modeline_from_rope(buffer_handle.read(cx).as_rope(), modeline_lines);
 
         log::debug!("Parsed modeline settings: {:?}", modeline_settings);
 
