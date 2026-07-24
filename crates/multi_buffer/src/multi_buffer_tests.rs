@@ -1,5 +1,6 @@
 use super::*;
 use buffer_diff::{DiffHunkStatus, DiffHunkStatusKind};
+use collections::HashMap;
 use gpui::{App, Entity, TestAppContext};
 use indoc::indoc;
 use language::{Buffer, Rope, language_settings::IndentationSettings};
@@ -4368,6 +4369,7 @@ async fn test_enclosing_indent(cx: &mut TestAppContext) {
             .enclosing_indent(
                 MultiBufferRow(buffer_row),
                 IndentationSettings::new(4.try_into().unwrap(), 4.try_into().unwrap(), false),
+                HashMap::default(),
             )
             .await?;
         Some((range.start.0..range.end.0, indent))
@@ -4434,10 +4436,58 @@ async fn test_enclosing_indent(cx: &mut TestAppContext) {
     let indentation = IndentationSettings::new(4.try_into().unwrap(), 8.try_into().unwrap(), true);
     assert_eq!(
         snapshot
-            .enclosing_indent(MultiBufferRow(2), indentation)
+            .enclosing_indent(MultiBufferRow(2), indentation, HashMap::default())
             .await
             .map(|(range, indent)| (range.start.0..range.end.0, indent)),
         Some((1..2, 4)),
+    );
+}
+
+#[gpui::test]
+async fn test_enclosing_indent_uses_per_buffer_indentation(cx: &mut TestAppContext) {
+    let tab_buffer = cx.new(|cx| Buffer::local("b_root\n\tb_child\n", cx));
+    let space_buffer = cx.new(|cx| Buffer::local("    a_child\na_root\n", cx));
+    let multibuffer = cx.new(|cx| {
+        let mut multibuffer = MultiBuffer::new(Capability::ReadWrite);
+        multibuffer.set_excerpt_ranges_for_path(
+            PathKey::sorted(0),
+            tab_buffer.clone(),
+            &tab_buffer.read(cx).snapshot(),
+            vec![ExcerptRange::new(Point::new(0, 0)..Point::new(1, 8))],
+            cx,
+        );
+        multibuffer.set_excerpt_ranges_for_path(
+            PathKey::sorted(1),
+            space_buffer.clone(),
+            &space_buffer.read(cx).snapshot(),
+            vec![ExcerptRange::new(Point::new(0, 0)..Point::new(1, 6))],
+            cx,
+        );
+        multibuffer
+    });
+    let tab_buffer_id = cx.read(|cx| tab_buffer.read(cx).remote_id());
+    let snapshot = cx.read(|cx| multibuffer.read(cx).snapshot(cx));
+    assert_eq!(snapshot.text(), "b_root\n\tb_child\n    a_child\na_root");
+
+    let default_indentation =
+        IndentationSettings::new(4.try_into().unwrap(), 4.try_into().unwrap(), false);
+    let tab_indentation =
+        IndentationSettings::new(2.try_into().unwrap(), 2.try_into().unwrap(), true);
+
+    // With the tab buffer's narrower tab width, its child line's indent column (2)
+    // is less than the target column (4), so it bounds the enclosing indent. If the
+    // default settings were applied to the tab buffer's rows, the tab would expand
+    // to column 4 and the walk would continue up to "b_root" instead.
+    assert_eq!(
+        snapshot
+            .enclosing_indent(
+                MultiBufferRow(2),
+                default_indentation,
+                HashMap::from_iter([(tab_buffer_id, tab_indentation)]),
+            )
+            .await
+            .map(|(range, indent)| (range.start.0..range.end.0, indent)),
+        Some((1..2, 2)),
     );
 }
 

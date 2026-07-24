@@ -5205,7 +5205,7 @@ impl Editor {
                             &language,
                         ) {
                             row_delta = Self::indent_selection(
-                                buffer, &snapshot, selection, &mut edits, row_delta, cx,
+                                &snapshot, selection, &mut edits, row_delta, cx,
                             );
                             continue;
                         }
@@ -5216,7 +5216,7 @@ impl Editor {
             // If the selection is non-empty, then increase the indentation of the selected lines.
             if !selection.is_empty() {
                 row_delta =
-                    Self::indent_selection(buffer, &snapshot, selection, &mut edits, row_delta, cx);
+                    Self::indent_selection(&snapshot, selection, &mut edits, row_delta, cx);
                 continue;
             }
 
@@ -5354,8 +5354,7 @@ impl Editor {
             }
             prev_edited_row = selection.end.row;
 
-            row_delta =
-                Self::indent_selection(buffer, &snapshot, selection, &mut edits, row_delta, cx);
+            row_delta = Self::indent_selection(&snapshot, selection, &mut edits, row_delta, cx);
         }
 
         self.transact(window, cx, |this, window, cx| {
@@ -5365,15 +5364,12 @@ impl Editor {
     }
 
     fn indent_selection(
-        buffer: &MultiBuffer,
         snapshot: &MultiBufferSnapshot,
         selection: &mut Selection<Point>,
         edits: &mut Vec<(Range<Point>, String)>,
         delta_for_start_row: i32,
         cx: &App,
     ) -> i32 {
-        let settings = buffer.language_settings_at(selection.start, cx);
-        let indentation = settings.indentation();
         let mut start_row = selection.start.row;
         let mut end_row = selection.end.row + 1;
 
@@ -5402,6 +5398,9 @@ impl Editor {
 
         let mut delta_for_end_row: i32 = 0;
         for row in start_row..end_row {
+            let indentation = snapshot
+                .language_settings_at(Point::new(row, 0), cx)
+                .indentation();
             let current_indent = snapshot.indent_size_for_line(MultiBufferRow(row));
             let current_column =
                 snapshot.indentation_column_for_line(MultiBufferRow(row), indentation);
@@ -5449,8 +5448,6 @@ impl Editor {
             let buffer = self.buffer.read(cx);
             let snapshot = buffer.snapshot(cx);
             for selection in &selections {
-                let settings = buffer.language_settings_at(selection.start, cx);
-                let indentation = settings.indentation();
                 let mut rows = selection.spanned_rows(false, &display_map);
 
                 // Avoid re-outdenting a row that has already been outdented by a
@@ -5463,6 +5460,9 @@ impl Editor {
                 for row in rows.iter_rows() {
                     let indent_size = snapshot.indent_size_for_line(row);
                     if indent_size.len > 0 {
+                        let indentation = snapshot
+                            .language_settings_at(Point::new(row.0, 0), cx)
+                            .indentation();
                         let current_column = snapshot.indentation_column_for_line(row, indentation);
                         let target_column = indentation.previous_indent_stop(current_column);
                         // A partial character deletion cannot reliably reach a display-column
