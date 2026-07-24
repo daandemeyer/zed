@@ -7,13 +7,20 @@ use collections::{HashMap, HashSet};
 use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Subscription, Task};
 use itertools::Itertools;
 use language::{
-    Anchor, Buffer, Capability, LanguageRegistry, OffsetRangeExt as _, Point, TextBuffer,
+    Anchor, Buffer, Capability, DiskState, File, LanguageRegistry, LocalFile, OffsetRangeExt as _,
+    Point, TextBuffer,
 };
 use markdown::Markdown;
 use multi_buffer::{MultiBuffer, PathKey, excerpt_context_lines};
-use std::{cmp::Reverse, ops::Range, path::Path, sync::Arc};
-use util::ResultExt;
-use util::paths::PathStyle;
+use project::{Project, WorktreeId};
+use std::{
+    cmp::Reverse,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use text::ReplicaId;
+use util::{ResultExt, paths::PathStyle, rel_path::RelPath};
 
 #[derive(Debug)]
 pub struct DiffPatch {
@@ -304,13 +311,21 @@ pub enum Diff {
 impl Diff {
     pub fn finalized(
         path: String,
+        file: Option<Arc<dyn File>>,
         old_text: Option<String>,
         new_text: String,
         language_registry: Arc<LanguageRegistry>,
         cx: &mut Context<Self>,
     ) -> Self {
         let multibuffer = cx.new(|_cx| MultiBuffer::without_headers(Capability::ReadOnly));
-        let new_buffer = cx.new(|cx| Buffer::local(new_text, cx));
+        let new_buffer = cx.new(|cx| {
+            let text_buffer = TextBuffer::new(
+                ReplicaId::LOCAL,
+                cx.entity_id().as_non_zero_u64().into(),
+                new_text,
+            );
+            Buffer::build(text_buffer, file, Capability::ReadWrite, cx)
+        });
         let base_text_exists = old_text.is_some();
         let base_text = old_text.clone().unwrap_or(String::new()).into();
         let task = cx.spawn({
@@ -557,13 +572,18 @@ impl PendingDiff {
         // Replace the buffer in the multibuffer with the snapshot
         let buffer = cx.new(|cx| {
             let language = self.new_buffer.read(cx).language().cloned();
+            let file = self
+                .new_buffer
+                .read(cx)
+                .file()
+                .map(|file| Arc::new(DetachedFile::new(file.as_ref(), cx)) as Arc<dyn File>);
             let buffer = TextBuffer::new_normalized(
                 replica_id,
                 cx.entity_id().as_non_zero_u64().into(),
                 self.new_buffer.read(cx).line_ending(),
                 self.new_buffer.read(cx).as_rope().clone(),
             );
-            let mut buffer = Buffer::build(buffer, None, Capability::ReadWrite, cx);
+            let mut buffer = Buffer::build(buffer, file, Capability::ReadWrite, cx);
             buffer.set_language(language, cx);
             buffer
         });
@@ -576,6 +596,7 @@ impl PendingDiff {
             }
         });
 
+        let new_buffer = buffer.clone();
         let update_diff = cx.spawn(async move |this, cx| {
             let buffer_diff = buffer_diff.await?;
             this.update(cx, |this, cx| {
@@ -600,7 +621,7 @@ impl PendingDiff {
             path,
             base_text: self.base_text.clone(),
             multibuffer: self.multibuffer.clone(),
-            new_buffer: self.new_buffer.clone(),
+            new_buffer,
             _update_diff: update_diff,
         }
     }
@@ -668,6 +689,112 @@ pub struct FinalizedDiff {
     _update_diff: Task<Result<()>>,
 }
 
+/// Resolves the worktree file for `path` so that the detached buffers
+/// backing finalized diff cards resolve path-dependent settings (such as
+/// .editorconfig and worktree-specific overrides) like the real buffer would.
+pub fn file_for_path(project: &Entity<Project>, path: &Path, cx: &App) -> Option<Arc<dyn File>> {
+    let project = project.read(cx);
+    let project_path = project.find_project_path(path, cx)?;
+    let worktree = project.worktree_for_id(project_path.worktree_id, cx)?;
+    let entry = worktree
+        .read(cx)
+        .entry_for_path(&project_path.path)
+        .cloned();
+    let file = if let Some(entry) = entry {
+        project::File::for_entry(entry, worktree)
+    } else {
+        let is_local = worktree.read(cx).is_local();
+        Arc::new(project::File {
+            worktree,
+            path: project_path.path,
+            disk_state: DiskState::New,
+            entry_id: None,
+            is_local,
+            is_private: false,
+        })
+    };
+    Some(Arc::new(DetachedFile::new(file.as_ref(), cx)))
+}
+
+/// `project::File` holds a strong `Entity<Worktree>`. Finalized diff cards stay
+/// in memory as long as their thread. A `project::File` in their buffers would
+/// keep a removed worktree alive, and `Project::wait_for_worktree_release`
+/// would never resolve.
+struct DetachedFile {
+    worktree_id: WorktreeId,
+    path: Arc<RelPath>,
+    full_path: PathBuf,
+    abs_path: Option<PathBuf>,
+    file_name: String,
+    path_style: PathStyle,
+    disk_state: DiskState,
+    is_private: bool,
+}
+
+impl DetachedFile {
+    fn new(file: &dyn File, cx: &App) -> Self {
+        Self {
+            worktree_id: file.worktree_id(cx),
+            path: file.path().clone(),
+            full_path: file.full_path(cx),
+            abs_path: file.file_system_abs_path(cx),
+            file_name: file.file_name(cx).to_owned(),
+            path_style: file.path_style(cx),
+            disk_state: file.disk_state(),
+            is_private: file.is_private(),
+        }
+    }
+}
+
+impl File for DetachedFile {
+    fn as_local(&self) -> Option<&dyn LocalFile> {
+        None
+    }
+
+    fn disk_state(&self) -> DiskState {
+        self.disk_state
+    }
+
+    fn path(&self) -> &Arc<RelPath> {
+        &self.path
+    }
+
+    fn full_path(&self, _: &App) -> PathBuf {
+        self.full_path.clone()
+    }
+
+    fn file_system_abs_path(&self, _: &App) -> Option<PathBuf> {
+        self.abs_path.clone()
+    }
+
+    fn path_style(&self, _: &App) -> PathStyle {
+        self.path_style
+    }
+
+    fn file_name<'a>(&'a self, _: &'a App) -> &'a str {
+        &self.file_name
+    }
+
+    fn worktree_id(&self, _: &App) -> WorktreeId {
+        self.worktree_id
+    }
+
+    fn to_proto(&self, _: &App) -> language::proto::File {
+        language::proto::File {
+            worktree_id: self.worktree_id.to_proto(),
+            entry_id: None,
+            path: self.path.as_unix_str().to_owned(),
+            mtime: self.disk_state.mtime().map(|time| time.into()),
+            is_deleted: self.disk_state.is_deleted(),
+            is_historic: matches!(self.disk_state, DiskState::Historic { .. }),
+        }
+    }
+
+    fn is_private(&self) -> bool {
+        self.is_private
+    }
+}
+
 async fn build_buffer_diff(
     old_text: Arc<str>,
     base_text_exists: bool,
@@ -697,9 +824,19 @@ mod tests {
     use gpui::TestAppContext;
     use indoc::indoc;
     use language::Buffer;
+    use project::FakeFs;
     use serde_json::json;
+    use settings::SettingsStore;
+    use util::path;
 
     use crate::Diff;
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+    }
 
     fn source(patch: &str, changes: serde_json::Value) -> acp_v2::Diff {
         serde_json::from_value(json!({
@@ -1042,5 +1179,201 @@ mod tests {
             buffer.set_text("HELLO!", cx);
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_finalized_diff_carries_file_association(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "a.txt": "one\ntwo\n" }))
+            .await;
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+
+        let diff = cx.new(|cx| {
+            let file = file_for_path(&project, Path::new(path!("/project/a.txt")), cx);
+            assert!(file.is_some());
+            Diff::finalized(
+                "a.txt".to_string(),
+                file,
+                Some("one\ntwo\n".to_string()),
+                "one\nTWO\n".to_string(),
+                language_registry,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let buffers = diff.multibuffer().read(cx).all_buffers();
+            assert_eq!(buffers.len(), 1);
+            for buffer in buffers {
+                let buffer = buffer.read(cx);
+                let file = buffer.file().expect("diff buffer should have a file");
+                assert_eq!(file.path().as_unix_str(), "a.txt");
+            }
+        });
+    }
+
+    #[gpui::test]
+    async fn test_finalized_diff_carries_file_association_for_new_file(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+
+        let diff = cx.new(|cx| {
+            let file = file_for_path(&project, Path::new(path!("/project/new.txt")), cx)
+                .expect("new project path should have a file association");
+            assert_eq!(file.path().as_unix_str(), "new.txt");
+            assert_eq!(file.disk_state(), DiskState::New);
+            Diff::finalized(
+                "new.txt".to_string(),
+                Some(file),
+                None,
+                "new contents\n".to_string(),
+                language_registry,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let buffers = diff.multibuffer().read(cx).all_buffers();
+            assert_eq!(buffers.len(), 1);
+            let buffer = buffers
+                .iter()
+                .next()
+                .expect("diff should contain one buffer")
+                .read(cx);
+            let file = buffer.file().expect("diff buffer should have a file");
+            assert_eq!(file.path().as_unix_str(), "new.txt");
+            assert_eq!(file.disk_state(), DiskState::New);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_finalize_preserves_file_association(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "a.txt": "one\ntwo\n" }))
+            .await;
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer(path!("/project/a.txt"), cx)
+            })
+            .await
+            .unwrap();
+
+        let diff = cx.new(|cx| Diff::new(buffer.clone(), cx));
+        buffer.update(cx, |buffer, cx| buffer.set_text("one\nTWO\n", cx));
+        cx.run_until_parked();
+
+        diff.update(cx, |diff, cx| diff.finalize(cx));
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let buffers = diff.multibuffer().read(cx).all_buffers();
+            assert_eq!(buffers.len(), 1);
+            for buffer in buffers {
+                let buffer = buffer.read(cx);
+                let file = buffer
+                    .file()
+                    .expect("finalized diff buffer should keep its file");
+                assert_eq!(file.path().as_unix_str(), "a.txt");
+                assert!(
+                    project::File::from_dyn(Some(file)).is_none(),
+                    "finalized diff buffer should not hold a worktree handle"
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    async fn test_finalize_does_not_retain_removed_worktree(cx: &mut TestAppContext) {
+        init_test(cx);
+        let file_system = FakeFs::new(cx.executor());
+        file_system
+            .insert_tree(path!("/project"), json!({ "a.txt": "one\ntwo\n" }))
+            .await;
+        let project = Project::test(file_system, [path!("/project").as_ref()], cx).await;
+        let (worktree_id, worktree) = project.read_with(cx, |project, cx| {
+            let worktree = project
+                .worktrees(cx)
+                .next()
+                .expect("project should have a worktree");
+            (worktree.read(cx).id(), worktree.downgrade())
+        });
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer(path!("/project/a.txt"), cx)
+            })
+            .await
+            .expect("source buffer should open");
+        let diff = cx.new(|cx| Diff::new(buffer.clone(), cx));
+        buffer.update(cx, |buffer, cx| buffer.set_text("one\nTWO\n", cx));
+        cx.run_until_parked();
+
+        diff.update(cx, |diff, cx| diff.finalize(cx));
+        cx.run_until_parked();
+        drop(buffer);
+
+        let released = project.update(cx, |project, cx| {
+            project.wait_for_worktree_release(worktree_id, cx)
+        });
+        project.update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
+        cx.run_until_parked();
+
+        assert!(
+            worktree.upgrade().is_none(),
+            "a finalized native diff should not keep a removed worktree alive"
+        );
+        released.await.expect("worktree should release");
+        diff.read_with(cx, |diff, cx| {
+            let file = diff.buffer().read(cx).file().expect("snapshot file");
+            assert_eq!(file.path().as_unix_str(), "a.txt");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_finalized_diff_does_not_retain_removed_worktree(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "a.txt": "one\ntwo\n" }))
+            .await;
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+        let (worktree_id, worktree) = project.read_with(cx, |project, cx| {
+            let worktree = project
+                .worktrees(cx)
+                .next()
+                .expect("project should have a worktree");
+            (worktree.read(cx).id(), worktree.downgrade())
+        });
+
+        let diff = cx.new(|cx| {
+            let file = file_for_path(&project, Path::new(path!("/project/a.txt")), cx);
+            assert!(file.is_some());
+            Diff::finalized(
+                "a.txt".to_string(),
+                file,
+                Some("one\ntwo\n".to_string()),
+                "one\nTWO\n".to_string(),
+                language_registry,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        project.update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
+        cx.run_until_parked();
+
+        assert!(
+            worktree.upgrade().is_none(),
+            "a finalized diff should not keep a removed worktree alive"
+        );
+        drop(diff);
     }
 }
