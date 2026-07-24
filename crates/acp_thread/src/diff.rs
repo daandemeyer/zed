@@ -7,11 +7,14 @@ use collections::{HashMap, HashSet};
 use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Subscription, Task};
 use itertools::Itertools;
 use language::{
-    Anchor, Buffer, Capability, LanguageRegistry, OffsetRangeExt as _, Point, TextBuffer,
+    Anchor, Buffer, Capability, DiskState, File, LanguageRegistry, OffsetRangeExt as _, Point,
+    TextBuffer,
 };
 use markdown::Markdown;
 use multi_buffer::{MultiBuffer, PathKey, excerpt_context_lines};
+use project::Project;
 use std::{cmp::Reverse, ops::Range, path::Path, sync::Arc};
+use text::ReplicaId;
 use util::ResultExt;
 
 #[derive(Debug)]
@@ -281,13 +284,21 @@ pub enum Diff {
 impl Diff {
     pub fn finalized(
         path: String,
+        file: Option<Arc<dyn File>>,
         old_text: Option<String>,
         new_text: String,
         language_registry: Arc<LanguageRegistry>,
         cx: &mut Context<Self>,
     ) -> Self {
         let multibuffer = cx.new(|_cx| MultiBuffer::without_headers(Capability::ReadOnly));
-        let new_buffer = cx.new(|cx| Buffer::local(new_text, cx));
+        let new_buffer = cx.new(|cx| {
+            let text_buffer = TextBuffer::new(
+                ReplicaId::LOCAL,
+                cx.entity_id().as_non_zero_u64().into(),
+                new_text,
+            );
+            Buffer::build(text_buffer, file, Capability::ReadWrite, cx)
+        });
         let base_text_exists = old_text.is_some();
         let base_text = old_text.clone().unwrap_or(String::new()).into();
         let task = cx.spawn({
@@ -534,13 +545,14 @@ impl PendingDiff {
         // Replace the buffer in the multibuffer with the snapshot
         let buffer = cx.new(|cx| {
             let language = self.new_buffer.read(cx).language().cloned();
+            let file = self.new_buffer.read(cx).file().cloned();
             let buffer = TextBuffer::new_normalized(
                 replica_id,
                 cx.entity_id().as_non_zero_u64().into(),
                 self.new_buffer.read(cx).line_ending(),
                 self.new_buffer.read(cx).as_rope().clone(),
             );
-            let mut buffer = Buffer::build(buffer, None, Capability::ReadWrite, cx);
+            let mut buffer = Buffer::build(buffer, file, Capability::ReadWrite, cx);
             buffer.set_language(language, cx);
             buffer
         });
@@ -645,6 +657,33 @@ pub struct FinalizedDiff {
     _update_diff: Task<Result<()>>,
 }
 
+/// Resolves a worktree file handle for `path` so that the detached buffers
+/// backing finalized diff cards resolve path-dependent settings (such as
+/// .editorconfig and worktree-specific overrides) like the real buffer would.
+pub fn file_for_path(project: &Entity<Project>, path: &Path, cx: &App) -> Option<Arc<dyn File>> {
+    let project = project.read(cx);
+    let project_path = project.find_project_path(path, cx)?;
+    let worktree = project.worktree_for_id(project_path.worktree_id, cx)?;
+    let entry = worktree
+        .read(cx)
+        .entry_for_path(&project_path.path)
+        .cloned();
+    let file: Arc<dyn File> = if let Some(entry) = entry {
+        project::File::for_entry(entry, worktree)
+    } else {
+        let is_local = worktree.read(cx).is_local();
+        Arc::new(project::File {
+            worktree,
+            path: project_path.path,
+            disk_state: DiskState::New,
+            entry_id: None,
+            is_local,
+            is_private: false,
+        })
+    };
+    Some(file)
+}
+
 async fn build_buffer_diff(
     old_text: Arc<str>,
     base_text_exists: bool,
@@ -674,9 +713,19 @@ mod tests {
     use gpui::TestAppContext;
     use indoc::indoc;
     use language::Buffer;
+    use project::FakeFs;
     use serde_json::json;
+    use settings::SettingsStore;
+    use util::path;
 
     use crate::Diff;
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+    }
 
     fn source(patch: &str, changes: serde_json::Value) -> acp_v2::Diff {
         serde_json::from_value(json!({
@@ -940,5 +989,111 @@ mod tests {
             buffer.set_text("HELLO!", cx);
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_finalized_diff_carries_file_association(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "a.txt": "one\ntwo\n" }))
+            .await;
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+
+        let diff = cx.new(|cx| {
+            let file = file_for_path(&project, Path::new(path!("/project/a.txt")), cx);
+            assert!(file.is_some());
+            Diff::finalized(
+                "a.txt".to_string(),
+                file,
+                Some("one\ntwo\n".to_string()),
+                "one\nTWO\n".to_string(),
+                language_registry,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let buffers = diff.multibuffer().read(cx).all_buffers();
+            assert_eq!(buffers.len(), 1);
+            for buffer in buffers {
+                let buffer = buffer.read(cx);
+                let file = buffer.file().expect("diff buffer should have a file");
+                assert_eq!(file.path().as_unix_str(), "a.txt");
+            }
+        });
+    }
+
+    #[gpui::test]
+    async fn test_finalized_diff_carries_file_association_for_new_file(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+
+        let diff = cx.new(|cx| {
+            let file = file_for_path(&project, Path::new(path!("/project/new.txt")), cx)
+                .expect("new project path should have a file association");
+            assert_eq!(file.path().as_unix_str(), "new.txt");
+            assert_eq!(file.disk_state(), DiskState::New);
+            Diff::finalized(
+                "new.txt".to_string(),
+                Some(file),
+                None,
+                "new contents\n".to_string(),
+                language_registry,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let buffers = diff.multibuffer().read(cx).all_buffers();
+            assert_eq!(buffers.len(), 1);
+            let buffer = buffers
+                .iter()
+                .next()
+                .expect("diff should contain one buffer")
+                .read(cx);
+            let file = buffer.file().expect("diff buffer should have a file");
+            assert_eq!(file.path().as_unix_str(), "new.txt");
+            assert_eq!(file.disk_state(), DiskState::New);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_finalize_preserves_file_association(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "a.txt": "one\ntwo\n" }))
+            .await;
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer(path!("/project/a.txt"), cx)
+            })
+            .await
+            .unwrap();
+
+        let diff = cx.new(|cx| Diff::new(buffer.clone(), cx));
+        buffer.update(cx, |buffer, cx| buffer.set_text("one\nTWO\n", cx));
+        cx.run_until_parked();
+
+        diff.update(cx, |diff, cx| diff.finalize(cx));
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let buffers = diff.multibuffer().read(cx).all_buffers();
+            assert_eq!(buffers.len(), 1);
+            for buffer in buffers {
+                let buffer = buffer.read(cx);
+                let file = buffer
+                    .file()
+                    .expect("finalized diff buffer should keep its file");
+                assert_eq!(file.path().as_unix_str(), "a.txt");
+            }
+        });
     }
 }
