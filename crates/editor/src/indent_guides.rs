@@ -1,8 +1,11 @@
 use std::{cmp::Ordering, ops::Range, time::Duration};
 
-use collections::HashSet;
+use collections::{HashMap, HashSet};
 use gpui::{App, AppContext as _, Context, Task, Window};
-use language::language_settings::LanguageSettings;
+use language::{
+    BufferId,
+    language_settings::{IndentationSettings, LanguageSettings},
+};
 use multi_buffer::{IndentGuide, MultiBufferRow, ToPoint};
 use text::Point;
 use util::ResultExt;
@@ -68,6 +71,7 @@ impl Editor {
         let selection = self.selections.newest::<Point>(&self.display_snapshot(cx));
         let cursor_row = MultiBufferRow(selection.head().row);
 
+        let buffer = self.buffer().clone();
         let state = &mut self.active_indent_guides_state;
 
         if state
@@ -97,13 +101,15 @@ impl Editor {
             }
 
             let snapshot = snapshot.clone();
-            let indentation = snapshot
-                .buffer_snapshot()
-                .language_settings_at(selection.head(), cx)
-                .indentation();
+            let (default_indentation, indentation_by_buffer) =
+                buffer.read(cx).indentation_settings(cx);
 
-            let task =
-                cx.background_spawn(resolve_indented_range(snapshot, cursor_row, indentation));
+            let task = cx.background_spawn(resolve_indented_range(
+                snapshot,
+                cursor_row,
+                default_indentation,
+                indentation_by_buffer,
+            ));
 
             // Try to resolve the indent in a short amount of time, otherwise move it to a background task.
             match cx
@@ -210,11 +216,12 @@ pub fn indent_guides_in_range(
 async fn resolve_indented_range(
     snapshot: DisplaySnapshot,
     buffer_row: MultiBufferRow,
-    indentation: language::language_settings::IndentationSettings,
+    default_indentation: IndentationSettings,
+    indentation_by_buffer: HashMap<BufferId, IndentationSettings>,
 ) -> Option<ActiveIndentedRange> {
     snapshot
         .buffer_snapshot()
-        .enclosing_indent(buffer_row, indentation)
+        .enclosing_indent(buffer_row, default_indentation, indentation_by_buffer)
         .await
         .map(|(row_range, indent_column)| ActiveIndentedRange {
             row_range,

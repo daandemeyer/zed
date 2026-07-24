@@ -6145,22 +6145,37 @@ impl MultiBufferSnapshot {
     pub async fn enclosing_indent(
         &self,
         mut target_row: MultiBufferRow,
-        indentation: IndentationSettings,
+        default_indentation: IndentationSettings,
+        indentation_by_buffer: HashMap<BufferId, IndentationSettings>,
     ) -> Option<(Range<MultiBufferRow>, u32)> {
+        let indentation_for_buffer = |buffer: &BufferSnapshot| {
+            indentation_by_buffer
+                .get(&buffer.remote_id())
+                .copied()
+                .unwrap_or(default_indentation)
+        };
+        let column_for_row = |row: MultiBufferRow| {
+            let indentation = self
+                .buffer_line_for_row(row)
+                .map(|(buffer, _)| indentation_for_buffer(buffer))
+                .unwrap_or(default_indentation);
+            self.indentation_column_for_line(row, indentation)
+        };
+
         let max_row = MultiBufferRow(self.max_point().row);
         if target_row >= max_row {
             return None;
         }
 
         let mut target_indent = self.line_indent_for_row(target_row);
-        let mut target_indent_column = self.indentation_column_for_line(target_row, indentation);
+        let mut target_indent_column = column_for_row(target_row);
 
         // If the current row is at the start of an indented block, we want to return this
         // block as the enclosing indent.
         if !target_indent.is_line_empty() && target_row < max_row {
             let next_row = MultiBufferRow(target_row.0 + 1);
             let next_line_indent = self.line_indent_for_row(next_row);
-            let next_indent_column = self.indentation_column_for_line(next_row, indentation);
+            let next_indent_column = column_for_row(next_row);
             if !next_line_indent.is_line_empty() && target_indent_column < next_indent_column {
                 target_indent = next_line_indent;
                 target_indent_column = next_indent_column;
@@ -6181,7 +6196,7 @@ impl MultiBufferSnapshot {
                 MultiBufferRow((max_row.0 + 1).min(target_row.0 + SEARCH_WHITESPACE_ROW_LIMIT));
 
             let mut non_empty_line_above = None;
-            for (row, indent, _) in self.reversed_line_indents(target_row, |_| true) {
+            for (row, indent, buffer) in self.reversed_line_indents(target_row, |_| true) {
                 if row < start {
                     break;
                 }
@@ -6191,6 +6206,7 @@ impl MultiBufferSnapshot {
                     yield_now().await;
                 }
                 if !indent.is_line_empty() {
+                    let indentation = indentation_for_buffer(buffer);
                     non_empty_line_above =
                         Some((row, self.indentation_column_for_line(row, indentation)));
                     break;
@@ -6198,7 +6214,7 @@ impl MultiBufferSnapshot {
             }
 
             let mut non_empty_line_below = None;
-            for (row, indent, _) in self.line_indents(target_row, |_| true) {
+            for (row, indent, buffer) in self.line_indents(target_row, |_| true) {
                 if row > end {
                     break;
                 }
@@ -6208,6 +6224,7 @@ impl MultiBufferSnapshot {
                     yield_now().await;
                 }
                 if !indent.is_line_empty() {
+                    let indentation = indentation_for_buffer(buffer);
                     non_empty_line_below =
                         Some((row, self.indentation_column_for_line(row, indentation)));
                     break;
@@ -6235,7 +6252,7 @@ impl MultiBufferSnapshot {
         let end = MultiBufferRow((max_row.0 + 1).min(target_row.0 + SEARCH_ROW_LIMIT));
 
         let mut start_indent = None;
-        for (row, indent, _) in self.reversed_line_indents(target_row, |_| true) {
+        for (row, indent, buffer) in self.reversed_line_indents(target_row, |_| true) {
             if row < start {
                 break;
             }
@@ -6244,7 +6261,8 @@ impl MultiBufferSnapshot {
                 accessed_row_counter = 0;
                 yield_now().await;
             }
-            let indent_column = self.indentation_column_for_line(row, indentation);
+            let indent_column =
+                self.indentation_column_for_line(row, indentation_for_buffer(buffer));
             if !indent.is_line_empty() && indent_column < target_indent_column {
                 start_indent = Some((row, indent_column));
                 break;
@@ -6253,7 +6271,7 @@ impl MultiBufferSnapshot {
         let (start_row, start_indent_column) = start_indent?;
 
         let mut end_indent = (end, None);
-        for (row, indent, _) in self.line_indents(target_row, |_| true) {
+        for (row, indent, buffer) in self.line_indents(target_row, |_| true) {
             if row > end {
                 break;
             }
@@ -6262,7 +6280,8 @@ impl MultiBufferSnapshot {
                 accessed_row_counter = 0;
                 yield_now().await;
             }
-            let indent_column = self.indentation_column_for_line(row, indentation);
+            let indent_column =
+                self.indentation_column_for_line(row, indentation_for_buffer(buffer));
             if !indent.is_line_empty() && indent_column < target_indent_column {
                 end_indent = (MultiBufferRow(row.0.saturating_sub(1)), Some(indent_column));
                 break;
