@@ -3895,10 +3895,7 @@ mod tests {
             );
             assert_eq!(tool.raw_input, Some(json!({"path": "./a/../b"})));
             assert_eq!(tool.raw_output, Some(json!({"retain": [null, true]})));
-            assert_eq!(
-                tool.meta.as_ref().and_then(|meta| meta.get("old")),
-                Some(&json!(true))
-            );
+            assert_eq!(tool.meta, Some(acp_v2::Meta::new()));
             let [location] = tool.locations.as_slice() else {
                 panic!("one raw location");
             };
@@ -3963,13 +3960,7 @@ mod tests {
                 "replacement"
             );
             assert_eq!(tool.terminals().cloned().collect::<Vec<_>>(), terminals);
-            assert_eq!(
-                tool.meta,
-                Some(
-                    serde_json::from_value(json!({"scope": "replacement", "old": true}))
-                        .expect("patched metadata")
-                )
-            );
+            assert_eq!(tool.meta, Some(acp_v2::Meta::new()));
             assert_eq!(tool.raw_input, Some(json!({"path": "./a/../b"})));
             assert_eq!(tool.locations.len(), 1);
         });
