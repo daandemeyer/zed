@@ -84,6 +84,17 @@ pub fn tool_name_from_meta(meta: &Option<acp_v2::Meta>) -> Option<SharedString> 
         .map(|name| SharedString::from(name.to_owned()))
 }
 
+/// claude-agent-acp puts the whole original file of an Edit call and the whole
+/// output of a Bash call into tool call metadata. Zed parses the keys it reads
+/// into `ToolCall` fields when the update arrives. Only the tool name is read
+/// again later, when an update changes the name without sending new metadata.
+fn retained_tool_meta(meta: Option<acp_v2::Meta>) -> Option<acp_v2::Meta> {
+    meta.map(|mut meta| {
+        meta.retain(|key, _| key == TOOL_NAME_META_KEY);
+        meta
+    })
+}
+
 /// Creates ACP metadata containing the legacy tool-name field.
 pub fn meta_with_tool_name(tool_name: &str) -> acp_v2::Meta {
     acp_v2::Meta::from_iter([(TOOL_NAME_META_KEY.into(), tool_name.into())])
@@ -1335,7 +1346,7 @@ impl ToolCall {
             name,
             reported_kind: kind,
             reported_status: patch.status.take(),
-            meta,
+            meta: retained_tool_meta(meta),
             structured_content: content,
             locations: patch.locations.take().unwrap_or_default(),
             resolved_locations: Vec::default(),
@@ -1504,19 +1515,20 @@ impl ToolCall {
                     self.sandbox_not_applied = Some(value);
                 }
                 if meta.is_some() {
-                    self.meta = meta;
+                    self.meta = retained_tool_meta(meta);
                 }
             }
             ToolMetadataPatch::Protocol(meta) => {
                 let meta_changed = !meta.is_undefined();
                 if meta_changed {
-                    self.meta = meta.take();
-                    self.subagent_session_info = subagent_session_info_from_meta(&self.meta);
+                    let meta = meta.take();
+                    self.subagent_session_info = subagent_session_info_from_meta(&meta);
                     self.sandbox_authorization_details =
-                        sandbox_authorization_details_from_meta(&self.meta);
+                        sandbox_authorization_details_from_meta(&meta);
                     self.sandbox_fallback_authorization_details =
-                        sandbox_fallback_authorization_details_from_meta(&self.meta);
-                    self.sandbox_not_applied = sandbox_not_applied_from_meta(&self.meta);
+                        sandbox_fallback_authorization_details_from_meta(&meta);
+                    self.sandbox_not_applied = sandbox_not_applied_from_meta(&meta);
+                    self.meta = retained_tool_meta(meta);
                 }
                 if name_changed || meta_changed {
                     self.tool_name = self
@@ -14792,7 +14804,7 @@ mod tests {
             assert_eq!(call.name.as_deref(), Some("named"));
             assert_eq!(
                 serde_json::to_value(&call.meta).expect("metadata"),
-                json!({"opaque": {"nested": [1, 2]}})
+                json!({})
             );
             let [ToolCallContent::ContentBlock { block, meta }] = call.content() else {
                 panic!("one protocol content block");
@@ -15097,7 +15109,13 @@ mod tests {
             assert_eq!(call.name, None);
             assert_eq!(call.tool_name.as_deref(), Some("legacy_name"));
             assert!(call.subagent_session_info.is_some());
-            assert_eq!(call.meta.as_ref(), Some(&meta));
+            assert_eq!(
+                call.meta.as_ref(),
+                Some(&acp_v1::Meta::from_iter([(
+                    TOOL_NAME_META_KEY.into(),
+                    json!("legacy_name")
+                )]))
+            );
 
             let newer_meta = acp_v1::Meta::from_iter([("opaque".into(), json!({"new": true}))]);
             thread
@@ -15106,12 +15124,12 @@ mod tests {
                         acp_v1::ToolCallId::new(id.0.clone()),
                         acp_v1::ToolCallUpdateFields::new(),
                     )
-                    .meta(newer_meta.clone()),
+                    .meta(newer_meta),
                     cx,
                 )
                 .expect("legacy metadata update");
             let (_, call) = thread.tool_call(&id).expect("tool");
-            assert_eq!(call.meta.as_ref(), Some(&newer_meta));
+            assert_eq!(call.meta.as_ref(), Some(&acp_v1::Meta::new()));
             assert_eq!(call.tool_name.as_deref(), Some("legacy_name"));
             assert!(call.subagent_session_info.is_some());
             thread
@@ -15148,6 +15166,57 @@ mod tests {
             assert_eq!(call.name.as_deref(), Some("first_class"));
             assert_eq!(call.tool_name.as_deref(), Some("first_class"));
             assert!(call.subagent_session_info.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_drops_metadata_that_is_not_read_later(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        thread.update(cx, |thread, cx| {
+            let id = acp_v2::ToolCallId::new("edit");
+            thread
+                .upsert_tool_call(
+                    acp_v1::ToolCall::new(acp_v1::ToolCallId::new(id.0.clone()), "Edit")
+                        .meta(meta_with_tool_name("Edit")),
+                    cx,
+                )
+                .expect("legacy creation");
+            thread
+                .update_tool_call(
+                    acp_v1::ToolCallUpdate::new(
+                        acp_v1::ToolCallId::new(id.0.clone()),
+                        acp_v1::ToolCallUpdateFields::new(),
+                    )
+                    .meta(acp_v1::Meta::from_iter([(
+                        "claudeCode".into(),
+                        json!({
+                            "toolName": "Edit",
+                            "toolResponse": {"originalFile": "x".repeat(4096)},
+                        }),
+                    )])),
+                    cx,
+                )
+                .expect("legacy metadata update");
+            let (_, call) = thread.tool_call(&id).expect("tool");
+            assert_eq!(call.meta.as_ref(), Some(&acp_v1::Meta::new()));
+            assert_eq!(call.tool_name.as_deref(), Some("Edit"));
+
+            thread
+                .upsert_wire_tool_call(
+                    acp_v2::ToolCallUpdate::new("edit").meta(acp_v2::Meta::from_iter([
+                        (TOOL_NAME_META_KEY.into(), json!("Edit")),
+                        (
+                            "terminal_output".into(),
+                            json!({"terminal_id": "edit", "data": "x".repeat(4096)}),
+                        ),
+                    ])),
+                    cx,
+                )
+                .expect("v2 metadata update");
+            let (_, call) = thread.tool_call(&id).expect("tool");
+            assert_eq!(call.meta.as_ref(), Some(&meta_with_tool_name("Edit")));
+            assert_eq!(call.tool_name.as_deref(), Some("Edit"));
         });
     }
 
