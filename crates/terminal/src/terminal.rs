@@ -2120,6 +2120,10 @@ impl Terminal {
     }
 
     pub fn shrink_to_used(&mut self) {
+        // Display-only terminals have no PTY, so `release_pty_resources` never drops
+        // their parse buffer. `write_raw_output` builds a new parse buffer if more
+        // output arrives.
+        self.output_processor = None;
         shrink_to_used(&mut self.term.lock());
     }
 
@@ -6203,6 +6207,28 @@ mod tests {
             "injecting output after a release should build a new parse buffer"
         );
         assert_content_eventually(&terminal, "injected_after_release", cx).await;
+    }
+
+    #[gpui::test]
+    async fn test_shrink_to_used_drops_the_parse_buffer(cx: &mut TestAppContext) {
+        let terminal = display_only_terminal(cx);
+        terminal.update(cx, |terminal, cx| terminal.write_output(b"finished\n", cx));
+        assert!(
+            terminal.read_with(cx, |terminal, _| terminal.output_processor.is_some()),
+            "writing output should build the parse buffer"
+        );
+
+        terminal.update(cx, |terminal, _| terminal.shrink_to_used());
+        assert!(
+            terminal.read_with(cx, |terminal, _| terminal.output_processor.is_none()),
+            "a finished display-only terminal should not keep the parse buffer"
+        );
+        assert!(terminal.read_with(cx, |terminal, _| {
+            terminal.get_content().contains("finished")
+        }));
+
+        terminal.update(cx, |terminal, cx| terminal.write_output(b"late\n", cx));
+        assert!(terminal.read_with(cx, |terminal, _| terminal.get_content().contains("late")));
     }
 
     mod perf {
