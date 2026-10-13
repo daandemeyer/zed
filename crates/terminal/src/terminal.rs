@@ -65,13 +65,13 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
-    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, used_lines, vi_goto_point,
-    vi_motion,
+    display_only_term_config, find_from_terminal_point, full_content_range, hyperlink_in_viewport,
+    last_non_empty_lines, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
+    set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, used_lines, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -2872,14 +2872,10 @@ impl Terminal {
 
             //Hyperlinks
             if self.selection_phase == SelectionPhase::Ended {
-                let mouse_cell_index =
-                    content_index_for_mouse(position, &self.last_content.terminal_bounds);
-                if let Some(link) = self
-                    .last_content
-                    .cells
-                    .get(mouse_cell_index)
-                    .and_then(|cell| cell.hyperlink())
-                {
+                let (row, column) =
+                    content_point_for_mouse(position, &self.last_content.terminal_bounds);
+                let link = hyperlink_in_viewport(&self.term.lock_unfair(), row, column);
+                if let Some(link) = link {
                     cx.open_url(link.uri());
                 } else if e.modifiers.secondary() {
                     self.events
@@ -3565,12 +3561,21 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
         .and_then(normalize_path_command_name)
 }
 
-fn content_index_for_mouse(pos: GpuiPoint<Pixels>, terminal_bounds: &TerminalBounds) -> usize {
+fn content_point_for_mouse(
+    pos: GpuiPoint<Pixels>,
+    terminal_bounds: &TerminalBounds,
+) -> (usize, usize) {
     let col = (pos.x / terminal_bounds.cell_width()).round() as usize;
     let clamped_col = min(col, terminal_bounds.num_columns().saturating_sub(1));
     let row = (pos.y / terminal_bounds.line_height()).round() as usize;
     let clamped_row = min(row, terminal_bounds.num_lines().saturating_sub(1));
-    clamped_row * terminal_bounds.num_columns() + clamped_col
+    (clamped_row, clamped_col)
+}
+
+#[cfg(test)]
+fn content_index_for_mouse(pos: GpuiPoint<Pixels>, terminal_bounds: &TerminalBounds) -> usize {
+    let (row, column) = content_point_for_mouse(pos, terminal_bounds);
+    row * terminal_bounds.num_columns() + column
 }
 
 /// Converts an 8 bit ANSI color to its GPUI equivalent.
@@ -6207,6 +6212,25 @@ mod tests {
             "injecting output after a release should build a new parse buffer"
         );
         assert_content_eventually(&terminal, "injected_after_release", cx).await;
+    }
+
+    #[gpui::test]
+    async fn test_click_opens_osc8_hyperlink_without_cell_snapshot(cx: &mut TestAppContext) {
+        let terminal = init_terminal_test(
+            cx,
+            b"\x1b]8;;https://zed.dev/\x1b\\link\x1b]8;;\x1b\\ text\r\n",
+        );
+        terminal.update(cx, |terminal, cx| {
+            terminal.last_content.cells = Vec::new();
+            let mouse_up = MouseUpEvent {
+                button: MouseButton::Left,
+                position: point(px(20.0), px(5.0)),
+                modifiers: Modifiers::default(),
+                click_count: 1,
+            };
+            terminal.mouse_up(&mouse_up, MouseInputMode::LocalSelection, cx);
+        });
+        assert_eq!(cx.opened_url().as_deref(), Some("https://zed.dev/"));
     }
 
     #[gpui::test]
