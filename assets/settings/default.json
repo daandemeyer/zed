@@ -1899,6 +1899,17 @@
     //
     // Trailing slashes are ignored.
     "worktree_directory": "../worktrees",
+    // Command that creates a linked worktree in place of `git worktree add`,
+    // given as a program followed by its arguments. Zed appends the path of
+    // the new worktree and the full SHA of the commit to check out. The
+    // command must leave a Git linked worktree at the path. Zed only reads
+    // this setting from user settings.
+    "worktree_create_command": null,
+    // Command that removes a linked worktree in place of `git worktree remove`,
+    // given as a program followed by its arguments. Zed appends the path of
+    // the worktree. The command must delete the worktree directory and its Git
+    // metadata. Zed only reads this setting from user settings.
+    "worktree_remove_command": null,
   },
   // The list of custom Git hosting providers.
   "git_hosting_providers": [

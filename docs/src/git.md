@@ -222,6 +222,41 @@ By default, Zed creates worktrees under `../worktrees` relative to the repositor
 
 See [All Settings](./reference/all-settings.md#git-worktree-directory) for examples.
 
+### Create Worktrees with Another Tool
+
+Zed creates and removes linked worktrees with `git worktree add` and `git worktree remove`.
+To use another tool, such as Jujutsu, set `git.worktree_create_command` and `git.worktree_remove_command`.
+Zed reads the commands from your user settings and ignores them in project settings.
+
+Each setting is a program followed by its arguments.
+Zed runs the command in the repository's working directory and appends arguments to it:
+
+- The create command receives the path of the new worktree and the full SHA of the commit to check out. It must leave a Git linked worktree at that path. Otherwise Zed doesn't show the worktree in the worktree picker.
+- The remove command receives the path of the worktree. It must delete the worktree directory and its Git metadata. Zed doesn't delete the directory itself. Zed runs the command even when the worktree contains uncommitted changes.
+
+The following settings create and remove colocated Jujutsu workspaces, which need jj 0.46 or later.
+The remove command snapshots the workspace before it deletes it, so jj keeps its uncommitted changes.
+The `sh` after each script sets `$0`, so the arguments from Zed are `$1` and `$2`.
+
+```json [settings]
+{
+  "git": {
+    "worktree_create_command": [
+      "sh",
+      "-c",
+      "jj workspace add --colocate -r \"$2\" \"$1\"",
+      "sh"
+    ],
+    "worktree_remove_command": [
+      "sh",
+      "-c",
+      "jj -R \"$1\" util snapshot && jj workspace forget \"$(basename \"$1\")\" && rm -rf \"$1\"",
+      "sh"
+    ]
+  }
+}
+```
+
 ### Init Setup
 
 To run setup steps after Zed creates a linked worktree, use the [`create_worktree` task hook](./tasks.md#hooks).

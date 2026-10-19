@@ -694,6 +694,31 @@ pub struct GitSettings {
     ///
     /// Default: ../worktrees
     pub worktree_directory: Option<String>,
+    /// Command that creates a linked worktree in place of `git worktree add`,
+    /// given as a program followed by its arguments.
+    ///
+    /// Zed appends the path of the new worktree and the full SHA of the commit
+    /// to check out. The command runs in the repository's working directory.
+    /// It must leave a Git linked worktree at the path, because Zed lists
+    /// worktrees with `git worktree list`. When Zed creates the worktree on a
+    /// branch, it checks out the branch after the command succeeds.
+    ///
+    /// Zed only reads this setting from user settings.
+    ///
+    /// Default: null
+    pub worktree_create_command: Option<Vec<String>>,
+    /// Command that removes a linked worktree in place of `git worktree
+    /// remove`, given as a program followed by its arguments.
+    ///
+    /// Zed appends the path of the worktree. The command runs in the
+    /// repository's working directory and must delete the worktree directory
+    /// and its Git metadata. Zed doesn't delete the directory itself when this
+    /// command is set.
+    ///
+    /// Zed only reads this setting from user settings.
+    ///
+    /// Default: null
+    pub worktree_remove_command: Option<Vec<String>>,
 }
 
 #[with_fallible_options]
