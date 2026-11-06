@@ -5744,6 +5744,26 @@ impl Sidebar {
             }
         }
 
+        let store = cx.update(|cx| ThreadMetadataStore::global(cx));
+        for (checkpoint_id, root) in completed_persists {
+            match store
+                .read_with(cx, |store, cx| {
+                    store.is_archived_worktree_referenced(checkpoint_id, cx)
+                })
+                .await
+            {
+                Ok(false) => {
+                    thread_worktree_archive::rollback_persist(checkpoint_id, &root, cx).await;
+                }
+                Ok(true) => {}
+                Err(error) => {
+                    log::error!(
+                        "Failed to check archived worktree {checkpoint_id} references: {error:#}"
+                    );
+                }
+            }
+        }
+
         Ok(ArchiveWorktreeOutcome::Success)
     }
 

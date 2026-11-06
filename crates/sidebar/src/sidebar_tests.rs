@@ -3039,6 +3039,9 @@ async fn test_terminal_close_event_keeps_linked_worktree_workspace_with_live_edi
 async fn test_archive_selected_draft_archives_linked_worktree_after_last_draft(
     cx: &mut TestAppContext,
 ) {
+    // A linked workspace contains two drafts and no submitted conversation history.
+    // Discarding the final draft must remove the workspace and release its
+    // checkpoint record and Git reference because no thread can restore them.
     init_test(cx);
 
     let fs = FakeFs::new(cx.executor());
@@ -3160,6 +3163,7 @@ async fn test_archive_selected_draft_archives_linked_worktree_after_last_draft(
     sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
     cx.run_until_parked();
 
+    // Discard the first draft while the second draft still requires the workspace.
     let first_draft_index = sidebar.read_with(cx, |sidebar, _cx| {
         sidebar
             .contents
@@ -3216,6 +3220,7 @@ async fn test_archive_selected_draft_archives_linked_worktree_after_last_draft(
         "linked worktree directory should remain while another draft references it"
     );
 
+    // Discard the last draft and check that its workspace and checkpoint are removed.
     let second_draft_index = sidebar.read_with(cx, |sidebar, _cx| {
         sidebar
             .contents
@@ -3260,6 +3265,25 @@ async fn test_archive_selected_draft_archives_linked_worktree_after_last_draft(
             .await,
         "linked worktree directory should be removed from disk after closing its last draft"
     );
+
+    let database_name =
+        cx.update(|_, cx| agent_ui::thread_metadata_store::TestMetadataDbName::global(cx));
+    let database = db::open_test_db::<()>(&database_name).await;
+    let checkpoint_count = database
+        .select_row::<i64>("SELECT COUNT(*) FROM archived_git_worktrees")
+        .expect("checkpoint count query should prepare")()
+    .expect("checkpoint count query should succeed");
+    assert_eq!(checkpoint_count, Some(0));
+    fs.with_git_state(Path::new("/project/.git"), false, |state| {
+        assert!(
+            state
+                .refs
+                .keys()
+                .all(|reference| !reference.starts_with("refs/archived-worktrees/")),
+            "discarding the final draft must release its archive ref"
+        );
+    })
+    .expect("main repository should remain available");
 }
 
 #[gpui::test]
@@ -4031,6 +4055,9 @@ async fn test_archive_selected_terminal_archives_closed_linked_worktree(cx: &mut
 
 #[gpui::test]
 async fn test_archive_selected_thread_archives_closed_linked_worktree(cx: &mut TestAppContext) {
+    // A submitted conversation belongs to a closed linked workspace.
+    // Archiving the conversation must remove the workspace and preserve the
+    // checkpoint record and Git reference needed to restore its history.
     init_test(cx);
 
     let fs = FakeFs::new(cx.executor());
@@ -4220,6 +4247,31 @@ async fn test_archive_selected_thread_archives_closed_linked_worktree(cx: &mut T
             .await,
         "linked worktree directory should be removed from disk after archiving its thread"
     );
+
+    let checkpoints = cx
+        .update(|_, cx| {
+            let store = ThreadMetadataStore::global(cx);
+            let store = store.read(cx);
+            let thread_id = store
+                .entry_by_session(&worktree_session_id)
+                .expect("archived thread metadata should remain")
+                .thread_id;
+            store.get_archived_worktrees_for_thread(thread_id, cx)
+        })
+        .await
+        .expect("archived checkpoints should load");
+    assert_eq!(checkpoints.len(), 1);
+    let checkpoint = checkpoints
+        .first()
+        .expect("thread should own its checkpoint");
+    fs.with_git_state(Path::new("/project/.git"), false, |state| {
+        assert!(
+            state
+                .refs
+                .contains_key(&format!("refs/archived-worktrees/{}", checkpoint.id))
+        );
+    })
+    .expect("main repository should retain the archive ref");
 }
 
 #[gpui::test]
