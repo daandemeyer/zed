@@ -328,7 +328,16 @@ fn draft_display_label_for_thread_metadata(
         &metadata.agent_id,
         cx,
     );
-    Some((placeholder, DraftKind::Empty))
+    let kind = if agent_ui::draft_prompt_store::draft_has_user_content(
+        metadata.thread_id,
+        workspace.into_iter(),
+        cx,
+    ) {
+        DraftKind::WithContent
+    } else {
+        DraftKind::Empty
+    };
+    Some((placeholder, kind))
 }
 
 fn thread_metadata_would_render_sidebar_row(

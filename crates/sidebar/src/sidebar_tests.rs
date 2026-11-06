@@ -7030,6 +7030,64 @@ async fn test_cmd_n_shows_new_thread_entry_in_absorbed_worktree(cx: &mut TestApp
 }
 
 #[gpui::test]
+async fn test_drafts_without_preview_labels_remain_visible(cx: &mut TestAppContext) {
+    // A closed linked workspace has a persisted draft whose content has no preview label.
+    // Text after a blank first line and image-only content must keep a visible row
+    // so the user can discard the draft that prevents worktree archival.
+    let (project, _fs) = init_test_project_with_git("/project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let sidebar = setup_sidebar(&multi_workspace, cx);
+
+    for blocks in [
+        vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
+            "\nKeep my workspace",
+        ))],
+        vec![acp_v2::ContentBlock::Image(acp_v2::ImageContent::new(
+            "AAE=",
+            "image/png",
+        ))],
+    ] {
+        let thread_id = save_draft_metadata_with_main_paths(
+            None,
+            PathList::new(&[PathBuf::from("/worktrees/project/feature-a/project")]),
+            PathList::new(&[PathBuf::from("/project")]),
+            Utc::now(),
+            cx,
+        );
+        cx.update(|_, cx| agent_ui::draft_prompt_store::write(thread_id, &blocks, cx))
+            .await
+            .expect("draft content should persist");
+        sidebar.update(cx, |sidebar, cx| sidebar.update_entries(cx));
+        cx.run_until_parked();
+
+        sidebar.read_with(cx, |sidebar, cx| {
+            let thread = sidebar
+                .contents
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    ListEntry::Thread(thread) if thread.metadata.thread_id == thread_id => {
+                        Some(thread)
+                    }
+                    _ => None,
+                })
+                .expect("the contentful draft should remain visible");
+            assert_eq!(thread.draft, Some(DraftKind::WithContent));
+            assert!(matches!(
+                thread.workspace,
+                ThreadEntryWorkspace::Closed { .. }
+            ));
+            assert!(Sidebar::thread_blocks_worktree_archive(
+                &thread.metadata,
+                &[],
+                cx,
+            ));
+        });
+    }
+}
+
+#[gpui::test]
 async fn test_only_actively_viewed_empty_draft_is_visible_in_sidebar(cx: &mut TestAppContext) {
     // The sidebar surfaces an empty-draft placeholder row only for the
     // draft that the *active workspace's panel* is currently viewing.
