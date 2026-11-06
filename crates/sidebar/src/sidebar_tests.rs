@@ -7140,16 +7140,12 @@ async fn test_drafts_without_preview_labels_remain_visible(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-async fn test_only_actively_viewed_empty_draft_is_visible_in_sidebar(cx: &mut TestAppContext) {
-    // The sidebar surfaces an empty-draft placeholder row only for the
-    // draft that the *active workspace's panel* is currently viewing.
-    // Specifically:
-    //   1. Empty ephemeral drafts in non-active workspaces (e.g. a
-    //      sibling linked-worktree panel) are hidden.
-    //   2. An empty ephemeral that is parked in its slot while the user
-    //      is viewing a real thread is hidden (it's not the active view).
-    //   3. When the active workspace switches, the placeholder follows
-    //      the new active panel's current view.
+async fn test_empty_draft_visibility_and_discard_action(cx: &mut TestAppContext) {
+    // Only the active workspace's empty draft should appear in the sidebar.
+    // Create main and linked-worktree drafts, switch between them, and discard
+    // the linked draft through its row action. The main draft must have no
+    // discard button, and discarding the linked draft must close its workspace.
+    use_unique_metadata_databases(cx);
     agent_ui::test_support::init_test(cx);
     cx.update(|cx| {
         ThreadStore::init_global(cx);
@@ -7193,6 +7189,10 @@ async fn test_only_actively_viewed_empty_draft_is_visible_in_sidebar(cx: &mut Te
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
     let (sidebar, main_panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+    cx.update(|_, cx| {
+        AcpThreadImportOnboarding::dismiss(cx);
+        CrossChannelImportOnboarding::dismiss(cx);
+    });
     // `mw.workspace()` returns the *currently active* workspace, so we
     // capture the main one here before adding the worktree workspace
     // (which would make it the active one).
@@ -7267,6 +7267,30 @@ async fn test_only_actively_viewed_empty_draft_is_visible_in_sidebar(cx: &mut Te
             })
         };
 
+    let hover_draft_row = |thread_id: ThreadId, cx: &mut VisualTestContext| {
+        cx.draw(
+            gpui::point(px(0.), px(0.)),
+            gpui::size(px(400.), px(400.)),
+            |_, _| sidebar.clone().into_any_element(),
+        );
+        let row_bounds = sidebar.read_with(cx, |sidebar, _| {
+            let index = sidebar
+                .contents
+                .entries
+                .iter()
+                .position(|entry| {
+                    matches!(entry, ListEntry::Thread(thread) if thread.metadata.thread_id == thread_id)
+                })
+                .expect("active draft should have a sidebar row");
+            sidebar
+                .list_state
+                .bounds_for_item(index)
+                .expect("active draft row should be rendered")
+        });
+        cx.simulate_mouse_move(row_bounds.center(), None, Modifiers::none());
+        row_bounds
+    };
+
     // Baseline: main workspace active, main panel viewing its draft.
     // Exactly one placeholder visible, matching the main panel's draft.
     let main_active_draft =
@@ -7276,6 +7300,12 @@ async fn test_only_actively_viewed_empty_draft_is_visible_in_sidebar(cx: &mut Te
         visible,
         vec![main_active_draft],
         "exactly the main panel's active empty draft should be visible"
+    );
+    let main_draft_bounds = hover_draft_row(main_active_draft, cx);
+    assert!(
+        cx.debug_bounds("ICON-Close")
+            .is_none_or(|bounds| main_draft_bounds.intersect(&bounds) != bounds),
+        "the main workspace's empty placeholder must not offer a discard button"
     );
 
     // Navigate the main panel AWAY from its draft to the real thread.
@@ -7322,6 +7352,32 @@ async fn test_only_actively_viewed_empty_draft_is_visible_in_sidebar(cx: &mut Te
         vec![worktree_active_draft],
         "exactly the worktree panel's active empty draft should be visible after switching workspaces"
     );
+
+    // Discard the linked workspace's empty draft through its sidebar button.
+    let worktree_draft_bounds = hover_draft_row(worktree_active_draft, cx);
+    let discard_bounds = cx
+        .debug_bounds("ICON-Close")
+        .expect("an empty linked-worktree draft should offer a discard button");
+    assert_eq!(
+        worktree_draft_bounds.intersect(&discard_bounds),
+        discard_bounds,
+        "the discard button must belong to the linked draft row"
+    );
+    cx.simulate_click(discard_bounds.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert!(
+            ThreadMetadataStore::global(cx)
+                .read(cx)
+                .entry(worktree_active_draft)
+                .is_none()
+        );
+    });
+    assert!(multi_workspace.read_with(cx, |multi_workspace, cx| {
+        multi_workspace
+            .workspace_for_paths(&PathList::new(&[PathBuf::from("/wt-feature-a")]), None, cx)
+            .is_none()
+    }));
 }
 
 async fn init_test_project_with_git(

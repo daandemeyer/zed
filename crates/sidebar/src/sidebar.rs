@@ -6288,6 +6288,10 @@ impl Sidebar {
         let is_selected = is_active;
         let is_draft = thread.draft.is_some();
         let is_empty_draft = thread.draft == Some(DraftKind::Empty);
+        let is_linked_worktree = thread
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.kind == ui::WorktreeKind::Linked);
         let can_request_stop = matches!(
             thread.status,
             AgentThreadStatus::Running
@@ -6418,8 +6422,8 @@ impl Sidebar {
                     )
                 } else {
                     match thread.draft {
-                        Some(DraftKind::Empty) => None,
-                        Some(DraftKind::WithContent) => Some(
+                        Some(DraftKind::Empty) if !is_linked_worktree => None,
+                        Some(_) => Some(
                             IconButton::new("discard_thread", IconName::Close)
                                 .hover_background(button_hover_bg)
                                 .active_background(button_active_bg)
